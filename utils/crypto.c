@@ -158,7 +158,7 @@ int aes256_gcm_encrypt2(struct aes256_gcm *aes,
 	
 	unsigned char *encrypted = *p_encrypted;
 	if(NULL == encrypted) {
-		encrypted = calloc(total_blocks, block_size);
+		encrypted = calloc(total_blocks + 1, block_size);	// (total blocks) + (1 padding blocks)
 		assert(p_encrypted);
 		*p_encrypted = encrypted;
 	}

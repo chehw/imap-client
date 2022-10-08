@@ -228,8 +228,11 @@ ssize_t read_password_stdin(char secret[], size_t size)
 #include "../utils/crypto.c"
 int main(int argc, char **argv)
 {
-	const char *utf8s[3] = {
-		"abc",
+#define NUM_STRINGS (5)
+	const char *utf8s[NUM_STRINGS] = {
+		"hello world!\n",
+		"123456789abcde", 	// (strlen + 1) == 15 bytes, cb_padding=17
+		"123456789abcdef", 	// (strlen + 1) == 16 bytes, cb_padding=16
 		"文字列の正確な長さを取得する",
 		"其它相关信息"
 	};
@@ -248,23 +251,29 @@ int main(int argc, char **argv)
 	struct aes256_gcm *aes = aes256_gcm_init(aes_buf, "seckey", -1, "salt", -1);
 	assert(aes);
 	
-	size_t cb_encrypted = 0;
-	
 	aes->use_padding = 1;
-	int rc = aes->encrypt(aes, utf8s[1], strlen(utf8s[1]) + 1, &p_dst, &cb_encrypted);
-	printf("rc = %d, cb_encrypted: %ld\n", rc, (long)cb_encrypted);
-	
-	char plain[200] = "";
-	char *p = plain;
-	size_t length = 0;
-	
-	rc = aes256_gcm_reset(aes);
-	rc = aes->decrypt(aes, encrypted, cb_encrypted, &p, &length);
-	printf("rc = %d, length: %ld\n", rc, (long)length);
-	
-	ssize_t num_bytes = 0;
-	ssize_t cb = utf8_strlen(plain, &num_bytes);
-	printf("cb=%ld, bytes=%ld, str=%s\n", (long)cb, num_bytes, plain);
+	for(int i = 0; i < NUM_STRINGS; ++i) {
+		size_t cb_encrypted = 0;
+		int rc = aes->encrypt(aes, utf8s[i], strlen(utf8s[i]) + 1, &p_dst, &cb_encrypted);
+		
+		printf("==== encrypt %d ====\n", i);
+		printf("rc = %d, cb_encrypted: %ld\n", rc, (long)cb_encrypted);
+		
+		char plain[200] = "";
+		char *p = plain;
+		size_t length = 0;
+		
+		rc = aes256_gcm_reset(aes);
+		rc = aes->decrypt(aes, encrypted, cb_encrypted, &p, &length);
+		printf("rc = %d, length: %ld\n", rc, (long)length);
+		
+		ssize_t num_bytes = 0;
+		ssize_t cb = utf8_strlen(plain, &num_bytes);
+		printf("cb=%ld, bytes=%ld, str=%s\n", (long)cb, num_bytes, plain);
+		
+		rc = aes256_gcm_reset(aes);
+		
+	}
 	
 	aes256_gcm_cleanup(aes);
 
