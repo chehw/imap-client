@@ -16,10 +16,11 @@ extern "C" {
 #endif
 
 struct shell_context;
+struct app_private;
 struct app_context
 {
 	void *user_data;
-	void *priv;
+	struct app_private *priv;
 	json_object *jconfig;
 	
 	const char *app_path;
@@ -35,6 +36,7 @@ struct app_context
 struct app_context *app_context_init(struct app_context *app, int argc, char **argv, void *user_data);
 void app_context_cleanup(struct app_context *app);
 
+struct mail_db_context *app_get_mail_db(struct app_context *app);
 #ifdef __cplusplus
 }
 #endif

@@ -68,32 +68,6 @@ label_err:
 	return rc;
 }
 
-#define print_flag_if_exists(fp, env_flags, flag) do { if(env_flags & flag) fprintf(fp, " "#flag); } while(0)
-static void dump_env_flags(FILE *fp, u_int32_t env_flags)
-{
-
-	if(NULL == fp) fp = stderr;
-	fprintf(fp, "== ENV_FLAGS:");
-	print_flag_if_exists(fp, env_flags, DB_INIT_MPOOL);
-	print_flag_if_exists(fp, env_flags, DB_INIT_CDB);
-	print_flag_if_exists(fp, env_flags, DB_INIT_LOCK);
-	print_flag_if_exists(fp, env_flags, DB_INIT_LOG);
-	print_flag_if_exists(fp, env_flags, DB_INIT_REP);
-	print_flag_if_exists(fp, env_flags, DB_CREATE);
-	print_flag_if_exists(fp, env_flags, DB_RECOVER);
-	print_flag_if_exists(fp, env_flags, DB_REGISTER);
-	print_flag_if_exists(fp, env_flags, DB_THREAD);
-	fprintf(fp, "\n");
-}
-
-static int db_txn_begin(struct mail_db_context *db, DB_TXN *parent_txn, DB_TXN **p_txn, uint32_t flags)
-{
-	DB_ENV *env = db->db_env;
-	assert(env);
-	if(db->cdb_mode) return env->cdsgroup_begin(env, p_txn);
-	return env->txn_begin(env, parent_txn, p_txn, flags);
-}
-
 struct mail_db_context *mail_db_context_init(struct mail_db_context *mail_db, 
 	const char *db_home, 
 	int use_cdb_mode, // Concurrent Data Store mode (multiple reader / single writer)
@@ -116,48 +90,17 @@ struct mail_db_context *mail_db_context_init(struct mail_db_context *mail_db,
 	if(NULL == mail_db) mail_db = calloc(1, sizeof(*mail_db));
 	assert(mail_db);
 	mail_db->app = app;
-	mail_db->cdb_mode = use_cdb_mode;
-	mail_db->txn_begin = db_txn_begin;
 	
-	u_int32_t env_flags = DB_INIT_MPOOL;
-	/** set subsystem flags */
-	if(use_cdb_mode) env_flags |= DB_INIT_CDB;
-	else {
-		env_flags |= DB_INIT_LOCK
-			| DB_INIT_LOG
-			| DB_INIT_REP	// DB_INIT_TXN
-			| DB_INIT_TXN	// transaction subsystem
-			| 0;
-	}
-	/** set other flags */
-	env_flags |= DB_CREATE;
-	if(!use_cdb_mode) {
-		env_flags |= DB_RECOVER // Run normal recovery on this environment before opening it for normal use
-			| DB_REGISTER // Check to see if recovery needs to be performed before opening the database environment. 
-			| DB_THREAD
-			| 0;
-	}
-	dump_env_flags(stderr, env_flags);
-			
-			
-	DB_ENV *db_env = NULL;
-	rc = db_env_create(&db_env, 0);
-	assert(0 == rc);
-	mail_db->db_env = db_env;
-	
-	db_env->set_errpfx(db_env, "MAIL-DB");
-	rc = db_env->open(db_env, db_home, env_flags, 0664);
-	if(rc) {
-		db_env->err(db_env, rc, "open env failed, err_code=%d. ", rc); 
-		exit(1);
-	}
+	struct bdb_environment *env = bdb_environment_init(mail_db->env, db_home, use_cdb_mode, mail_db);
+	assert(env);
 	
 	return mail_db;
 }
 
 void mail_db_context_cleanup(struct mail_db_context *mail_db)
 {
-	///< @todo
+	
+	bdb_environment_cleanup(mail_db->env);
 }
 
 
@@ -198,58 +141,38 @@ void db_check_error(int rc) {
 
 
 #if defined(TEST_MAIL_DB_) && defined(_STAND_ALONE)
+
+#include "bdb_context.c"
+
 static struct mail_db_context g_mail_db[1];
 static struct app_context g_app[1];
 
-static DB *open_db(struct mail_db_context *mail_db, const char *db_name, int type)
+static struct bdb_context *open_db(struct mail_db_context *mail_db, const char *db_filename, int type)
 {
 	int rc = 0;
 	u_int32_t db_type = (type==0)?DB_BTREE:DB_HASH;
-	DB_ENV *env = mail_db->db_env;
+	
+	struct bdb_environment *env = mail_db->env;
 	assert(env);
 	
-	DB *dbp = NULL;
-	rc = db_create(&dbp, env, 0);
-	if(rc) {
-		env->err(env, rc, "%s() failed. rc=%d\n", "db_create", rc);
-		return NULL;
-	}
+	if(NULL == db_filename) db_filename = "test1.db";
 	
-	DB_TXN *txn = NULL;
-	rc = mail_db->txn_begin(mail_db, NULL, &txn, 0);
-	if(rc) {
-		env->err(env, rc, "%s() failed, rc=%d.\n", "txn_begin", rc);
-		exit(1);
-	}
-	
-	rc = dbp->open(dbp, txn, "test1.db", "raw_data", db_type, DB_CREATE, 0664);
-	if(rc) {
-		dbp->err(dbp, rc, "open db failed\n");
-		txn->abort(txn);
-		
-		dbp->close(dbp, 0);
-		return NULL;
-	}
-	
-	rc = txn->commit(txn, 0);
-	if(rc) {
-		dbp->err(dbp, rc, "open db: commit txn failed\n");
-		dbp->close(dbp, 0);
-		return NULL;
-	}
-
-	return dbp;
+	struct bdb_context *db = bdb_context_init(NULL, env, mail_db);
+	assert(db);
+	rc = db->open(db, db_filename, NULL, db_type, 0);
+	assert(0 == rc);
+	return db;
 }
 
 #include <pthread.h>
 #include <endian.h>
 
-#define NUM_THREADS (4)
+#define NUM_THREADS (1)
 struct worker_context 
 {
 	pthread_cond_t cond;
 	pthread_mutex_t mutex;
-	DB *dbp;
+	struct bdb_context *db;
 
 	int quit;
 	int index;
@@ -259,9 +182,9 @@ static void * reader_thread(void *user_data)
 {
 	int rc = 0;
 	struct worker_context *worker = user_data;
-	assert(worker && worker->dbp);
+	assert(worker && worker->db);
 	
-	DB *dbp = worker->dbp;
+	struct bdb_context *db = worker->db;
 	
 	pthread_mutex_lock(&worker->mutex);
 	while(!worker->quit) {
@@ -272,34 +195,38 @@ static void * reader_thread(void *user_data)
 		}
 		if(worker->quit) break;
 		
-		// dump records
-		DBT key, value;
-		memset(&key, 0, sizeof(key));
-		memset(&value, 0, sizeof(value));
+		printf("reader %d started ...\n", worker->index);
 		
-		uint64_t uid;
-		key.data = &uid;
-		key.ulen = sizeof(uid);
-		key.flags = DB_DBT_USERMEM;
-		
-		DBC *cursorp = NULL;
-		rc = dbp->cursor(dbp, NULL, &cursorp, 0);
+		rc = db->iter_new(db, NULL, 0);
 		assert(0 == rc);
 		
-		rc = cursorp->get(cursorp, &key, &value, DB_FIRST);
-		while(0 == rc) {
+		rc = db->iter_first(db);
+		
+		while(0 == rc)
+		{
+			DBT *key = db->pkey;
+			DBT *value = db->value;
+			
+			assert(key->data);
+			if(NULL == key->data) {
+				break;
+			}
+			assert(key->size == sizeof(uint64_t));
+			uint64_t uid = *(uint64_t *)key->data;
 			uid = be64toh(uid);
 			printf("worker[%d]: uid: %lu, data(cb=%ld): %s\n", 
 				worker->index, 
 				(unsigned long)uid, 
-				(long)value.size, 
-				(char *)value.data);
-			
-			rc = cursorp->get(cursorp, &key, &value, DB_NEXT);
+				(long)value->size, 
+				(char *)value->data);
+				
+			rc = db->iter_next(db, 0);
 		}
 		if(rc != DB_NOTFOUND) {
-			dbp->err(dbp, rc, "cursorp->get() failed\n");
+			db->dbp->err(db->dbp, rc, "cursorp->get() failed\n");
 		}
+		
+		rc = db->iter_close(db);
 	}
 	
 	pthread_mutex_unlock(&worker->mutex);
@@ -309,15 +236,14 @@ static void * reader_thread(void *user_data)
 int main(int argc, char **argv)
 {
 	struct mail_db_context *mail_db = mail_db_context_init(g_mail_db, NULL, (argc == 1), g_app);
-	assert(mail_db);
+	assert(mail_db && mail_db->env);
 	int rc = 0;
-	DB_ENV *env = mail_db->db_env;
-	assert(env);
-	
-	DB *dbp = open_db(mail_db, "test1.db", 0);
-	assert(dbp);
 	
 	
+	struct bdb_context *db = open_db(mail_db, "test1.db", 0);
+	assert(db);
+	
+	printf("db: %p\n", db);	
 	pthread_t th[NUM_THREADS];
 	
 	struct worker_context workers[NUM_THREADS];
@@ -325,16 +251,24 @@ int main(int argc, char **argv)
 	
 	for(int i = 0; i < NUM_THREADS; ++i) {
 		workers[i].index = i;
-		workers[i].dbp = dbp;
+		workers[i].db = db;
+		workers[i].quit = 0;
 		
 		rc = pthread_cond_init(&workers[i].cond, NULL);
 		assert(0 == rc);
 		rc = pthread_mutex_init(&workers[i].mutex, NULL);
 		assert(0 == rc);
-
 		rc = pthread_create(&th[i], NULL, reader_thread, &workers[i]);
 	}
 	
+	const struct timespec interval = {
+		.tv_sec = 0,
+		.tv_nsec = 10 * 1000, // 10 us
+	};
+	nanosleep(&interval, NULL);
+	
+	
+	printf("insert data ...\n");
 	// insert test data
 	for(int i = 0; i < 10; ++i) {
 		uint64_t uid = 0;
@@ -344,27 +278,19 @@ int main(int argc, char **argv)
 		cb_text = snprintf(text, sizeof(text), "text %d", i);
 		uid = htobe64(i + 1);
 		
-		DBT key, value;
-		memset(&key, 0, sizeof(key));
-		memset(&value, 0, sizeof(value));
-		
-		key.data = &uid;
-		key.size = sizeof(uid);
-		key.ulen = sizeof(uid);
-		key.flags = DB_DBT_USERMEM;
-		
-		value.data = text;
-		value.size = cb_text + 1;
-		
-		rc = dbp->put(dbp, NULL, &key, &value, DB_AUTO_COMMIT);
+		printf("put %d ...\n", i);
+		rc = db->put(db, NULL, &uid, sizeof(uid), text, cb_text + 1, DB_AUTO_COMMIT);
 		if(rc) {
 			if(rc != DB_KEYEXIST) {
-				dbp->err(dbp, rc, "insert item %d failed\n", i);
+				db->dbp->err(db->dbp, rc, "insert item %d failed\n", i);
 				exit(1);
+			}else {
+				printf(" ==> dup\n");
 			}
 		}
 	}
 	
+	printf("reading ...\n");
 	// read records
 	for(int i = 0; i < NUM_THREADS; ++i) {
 		pthread_mutex_lock(&workers[i].mutex);
@@ -373,6 +299,7 @@ int main(int argc, char **argv)
 		
 	}
 	
+	nanosleep(&interval, 0);
 	// cleanup
 	for(int i = 0; i < NUM_THREADS; ++i) {
 		pthread_mutex_lock(&workers[i].mutex);
@@ -390,6 +317,9 @@ int main(int argc, char **argv)
 		
 	}
 	
+	
+	db->close(db);
+	free(db);
 
 	mail_db_context_cleanup(mail_db);
 	return 0;

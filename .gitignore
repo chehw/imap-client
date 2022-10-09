@@ -52,10 +52,28 @@ Mkfile.old
 dkms.conf
 
 # app
+*
+!Makefile
+!doc
+!doc/*
+!*.*
+!src
+!include
+!utils
+!tests
+!src/*.c
+!src/*.h
+!include/*.h
+!utils/*
+!tests/*
+!conf
+!conf/*.json
 tmp/
 *.bak*
 db
 db.*
 log
-
+*.log
+*.o
+*.old
 

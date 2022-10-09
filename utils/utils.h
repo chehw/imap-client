@@ -7,6 +7,17 @@
 extern "C" {
 #endif
 
+#ifndef debug_printf
+#ifdef _DEBUG
+#define debug_printf(fmt, ...) do { \
+		fprintf(stderr, "\e[33m" "%s(%d):" fmt "\e[39m" "\n", \
+			__FILE__, __LINE__, ##__VA_ARGS__); \
+		} while(0)
+#else
+#define debug_printf(fmt, ...) do { } while(0)
+#endif
+#endif
+
 char *trim_left(char *p_begin, char *p_end);
 char *trim_right(char *p_begin, char *p_end);
 #define trim(p_begin) ({ char *p_end = p_begin +strlen(p_begin); \

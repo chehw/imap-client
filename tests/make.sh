@@ -5,11 +5,11 @@ target=$(basename ${target})
 target=${target/.[ch]/}
 
 case "$target" in
-	mail_db)
-		gcc -std=gnu99 -g -Wall -I../include -I../src \
+	mail_db|bdb_context)
+		gcc -std=gnu99 -g -Wall -I../include -I../src -pthread -D_DEBUG \
 			-DTEST_MAIL_DB_ -D_STAND_ALONE \
-			-o test_"$target" \
-			../src/${target}.c \
+			-o test_mail_db \
+			../src/mail_db.c \
 			-lm -lpthread -ljson-c -ldb
 		;;
 	shell)
