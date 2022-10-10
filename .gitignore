@@ -76,4 +76,7 @@ log
 *.log
 *.o
 *.old
+!tools
+!tools/*.c
+!tools/*.h
 
