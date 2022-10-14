@@ -7,6 +7,36 @@ extern "C" {
 
 #include <json-c/json.h>
 
+struct imap_buffer
+{
+	size_t size;
+	size_t length;
+	size_t start_pos;
+	ssize_t refs;
+	char *data;
+};
+struct imap_buffer *imap_buffer_init(struct imap_buffer *buffer, size_t size);
+int imap_buffer_resize(struct imap_buffer *buffer, size_t new_size);
+int imap_buffer_push_data(struct imap_buffer *buffer, char *data, size_t length);
+ssize_t imap_buffer_pop_data(struct imap_buffer *buffer, char **p_data, size_t size);
+void imap_buffer_clear(struct imap_buffer *buffer);
+#define imap_buffer_addref(buffer) ++buffer->refs;
+#define imap_buffer_unref(buffer) do { \
+		if((buffer->refs > 0) && (0 == --buffer->refs)) { imap_buffer_clear(buffer); free(buffer); }; \
+	} while(0)
+
+
+struct imap_buffer_array
+{
+	size_t size;
+	size_t length;
+	struct imap_buffer **items;
+};
+struct imap_buffer_array *imap_buffer_array_init(struct imap_buffer_array *array, size_t size);
+int imap_buffer_array_resize(struct imap_buffer_array *array, size_t new_size);
+int imap_buffer_array_append(struct imap_buffer_array *array, struct imap_buffer *buffer);
+void imap_buffer_array_cleanup(struct imap_buffer_array *array);
+
 struct imap_credentials
 {
 	char *server;
@@ -14,17 +44,41 @@ struct imap_credentials
 	char *secret;
 	char *auth_type;
 };
+struct imap_credentials * imap_credentials_load(struct imap_credentials *cred, const char *credentials_file, const char *file_password);
+void imap_credentials_clear(struct imap_credentials *cred);
+struct imap_credentials *imap_credentials_copy(struct imap_credentials *dst, const struct imap_credentials *src);
 
+struct imap_command
+{
+	char tag[16];
+	char *command;
+	char *params;
+	int status;	// 0: pending, 1: ok, -1: error
+};
+struct imap_command *imap_command_new(const char *tag, const char *command, const char *params);
+void imap_command_free(struct imap_command *command);
+
+
+struct imap_response
+{
+	char tag[16];
+	char *status;
+	char *status_desc;
+	
+	ssize_t num_lines;
+	char **lines;
+};
+
+struct imap_private;
 struct imap_client_context
 {
 	void *user_data;
-	void *priv;
-	struct imap_credentials credentials[1];
-	long tag_index;
+	struct imap_private *priv;
 	
-	int (*load_credentials)(struct imap_client_context *imap, const char *credentials_file, const char *file_password);
-	int (*list)(struct imap_client_context *imap, const char *folder, const char *params, json_object *jresult);
-	int (*send_request)(struct imap_client_context *imap, const char *command, const char *params, json_object *jresult);
+	int (*connect)(struct imap_client_context *imap, const struct imap_credentials *credentials);
+	int (*disconnect)(struct imap_client_context *imap);
+	
+	int (*on_response)(struct imap_client_context *imap, const char *data, size_t length);
 };
 
 struct imap_client_context * imap_client_context_init(struct imap_client_context *imap, void *user_data);

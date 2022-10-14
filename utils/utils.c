@@ -30,6 +30,10 @@
 #include <assert.h>
 #include <stdbool.h>
 
+#include <fcntl.h>
+#include <errno.h>
+#include <netdb.h>
+
 #include <termios.h>
 #include <unistd.h>
 #include "utils.h"
@@ -222,6 +226,164 @@ ssize_t read_password_stdin(char secret[], size_t size)
 	return cb_secret;
 }
 
+
+
+/******************************************************************************
+ * make_nonblock
+******************************************************************************/
+int make_nonblock(int fd)
+{
+	int flags = fcntl(fd, F_GETFL);
+	if(-1 == flags) {
+		perror("get file flags failed.");
+		return -1;
+	}
+	
+	flags |= O_NONBLOCK;
+	int rc = fcntl(fd, F_SETFL, flags);
+	if(rc) {
+		perror("set nonblock mode failed.");
+		return -1;
+	}
+	return rc;
+}
+
+/******************************************************************************
+ * tcp_connect2
+******************************************************************************/
+int tcp_connect2(const char *server, const char *port, int nonblock, struct addrinfo *p_addr)
+{
+	struct addrinfo hints, *serv_info = NULL, *pai = NULL;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = PF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	
+	int sd = -1;
+	int rc = getaddrinfo(server, port, &hints, &serv_info);
+	if(rc) {
+		fprintf(stderr, "[ERROR]: getaddrinfo(%s:%s) failed: %s\n", server, port, gai_strerror(rc));
+		return -1;
+	}
+	
+	for(pai = serv_info; NULL != pai; pai = pai->ai_next)
+	{
+		sd = socket(pai->ai_family, pai->ai_socktype, pai->ai_protocol);
+		if(sd == -1) continue;
+		
+		rc = connect(sd, pai->ai_addr, pai->ai_addrlen);
+		if(-1 == rc) {
+			perror("connect failed.");
+			close_socket(sd);
+		}
+		break;
+	}
+	
+	if(NULL == pai) {
+		freeaddrinfo(serv_info);
+		return -1;
+	}
+	
+	char hbuf[NI_MAXHOST] = "";
+	char sbuf[NI_MAXSERV] = "";
+	rc = getnameinfo(pai->ai_addr, pai->ai_addrlen, 
+		hbuf, sizeof(hbuf), sbuf, sizeof(sbuf), 
+		NI_NUMERICHOST | NI_NUMERICSERV);
+	if(0 == rc) {
+		fprintf(stderr, "connected to %s:%s\n", hbuf, sbuf);
+	}
+	
+	if(p_addr) {
+		struct sockaddr *addr = calloc(pai->ai_addrlen, 1);
+		assert(addr);
+		*p_addr = *pai;
+		p_addr->ai_addr = addr;
+		p_addr->ai_next = NULL;
+	}
+	freeaddrinfo(serv_info);
+	
+	if(nonblock) {
+		rc = make_nonblock(sd);
+		if(rc) {
+			close_socket(sd);
+			return -1;
+		}
+	}
+	return sd;
+}
+
+
+
+/******************************************************************************
+struct clib_queue
+{
+	size_t size;
+	size_t length;
+	size_t start_pos;
+	void **items;
+};
+******************************************************************************/
+int clib_queue_resize(struct clib_queue *queue, size_t new_size)
+{
+	static const size_t alloc_size = 4096;
+	if(new_size == 0) new_size = alloc_size;
+	else new_size = (new_size + alloc_size - 1) / alloc_size * alloc_size;
+	if(new_size <= queue->size) return -1;
+	
+	void **items = realloc(queue->items, new_size * sizeof(*items));
+	assert(items);
+	memset(items + queue->size, 0, (new_size - queue->size)*sizeof(*items));
+	
+	queue->items = items;
+	queue->size = new_size;
+	return 0;
+}
+
+struct clib_queue *clib_queue_init(struct clib_queue *queue, size_t size)
+{
+	if(NULL == queue) queue = calloc(1, sizeof(*queue));
+	memset(queue, 0, sizeof(*queue));
+	assert(queue);
+	
+	int rc = clib_queue_resize(queue, size);
+	assert(0 == rc);
+	
+	return queue;
+}
+int clib_queue_enter(struct clib_queue *queue, void *item)
+{
+	int rc = clib_queue_resize(queue, queue->start_pos + queue->length + 1);
+	assert(0 == rc);
+	
+	queue->items[queue->start_pos + queue->length++] = item;
+	return 0;
+}
+void *clib_queue_leave(struct clib_queue *queue)
+{
+	if(queue->length == 0) return NULL;
+	void *item = queue->items[queue->start_pos];
+	queue->items[queue->start_pos] = NULL;
+	++queue->start_pos;
+	--queue->length;
+	if(queue->length == 0) queue->start_pos = 0;
+	return item;
+}
+
+void clib_queue_cleanup(struct clib_queue *queue, void (*free_item)(void *))
+{
+	if(NULL == queue) return;
+	
+	if(queue->items) {
+		for(size_t i = 0; i < queue->length; ++i) {
+			if(free_item) free_item(queue->items[i + queue->start_pos]);
+			queue->items[i + queue->start_pos] = NULL;
+		}
+		free(queue->items);
+		queue->items = NULL;
+	}
+	
+	memset(queue, 0, sizeof(*queue));
+	return;
+}
 
 #if defined(TEST_UTILS_) && defined(_STAND_ALONE)
 

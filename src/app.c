@@ -90,6 +90,9 @@ void app_private_free(struct app_private *priv)
 {
 	if(NULL == priv) return;
 	
+	if(priv->imap) imap_client_context_cleanup(priv->imap);
+	if(priv->mail_db) mail_db_context_cleanup(priv->mail_db);
+	
 	free(priv);
 }
 
@@ -139,13 +142,18 @@ static int app_private_parse_args(struct app_private *priv, int argc, char **arg
 	else {
 		snprintf(priv->conf_file, sizeof(priv->conf_file), "conf/%s", priv->app_name);
 		char *p = strrchr(priv->conf_file, '.');
-		if(p) strncpy(p, ".json", priv->conf_file + sizeof(priv->conf_file) - p);
+		if(NULL == p) {
+			size_t cb = strlen(priv->conf_file);
+			assert((cb + 5) < sizeof(priv->conf_file));
+			p = priv->conf_file + cb;
+		}
+		strncpy(p, ".json", priv->conf_file + sizeof(priv->conf_file) - p);
 		conf_file = priv->conf_file;
 	}
 	
 	json_object *jconfig = json_object_from_file(conf_file);
 	if(NULL == jconfig) {
-		fprintf(stderr, "invalid config file: %s\n", conf_file);
+		debug_printf("[WARNING]: load config file failed: %s", conf_file);
 	}
 	priv->app->jconfig = jconfig;
 	

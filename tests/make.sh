@@ -27,6 +27,19 @@ case "$target" in
 			$(pkg-config --cflags --libs gnutls)
 		;;
 		
+	imap_client|app|imap_buffer)
+		gcc -std=gnu99 -g -Wall -D_DEBUG -D_DEFAULT_SOURCE -D_GNU_SOURCE \
+			-DTEST_IMAP_CLIENT_ -D_STAND_ALONE \
+			-I../include -I../src -I../utils \
+			-o test_imap_client \
+			../src/imap_client.c ../src/imap_buffer.c ../src/app.c \
+			../src/mail_db.c ../src/shell.c ../src/bdb_context.c \
+			../utils/utils.c ../utils/crypto.c \
+			-lm -lpthread -ljson-c -ldb \
+			$(pkg-config --cflags --libs gnutls gtk+-3.0 webkit2gtk-4.0)
+		;;
+		
+		
 	*)
 		echo "build nothing."
 		exit 1

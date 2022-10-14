@@ -241,6 +241,7 @@ int aes256_gcm_decrypt2(struct aes256_gcm *aes,
 		
 		if(cb_padding > 1) {
 			assert((unsigned char)plain_text[length - cb_padding] == (unsigned char)0x80);
+			plain_text[length - cb_padding] = '\0';
 		}
 		
 		length -= cb_padding;
