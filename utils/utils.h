@@ -64,6 +64,19 @@ int clib_queue_enter(struct clib_queue *queue, void *item);
 void *clib_queue_leave(struct clib_queue *queue);
 void clib_queue_cleanup(struct clib_queue *queue, void (*free_item)(void *));
 
+
+
+
+struct lines_array
+{
+	size_t size;
+	size_t length;
+	char **lines;
+};
+void lines_array_clear(struct lines_array *array);
+int lines_array_resize(struct lines_array *array, size_t new_size);
+char *lines_array_add(struct lines_array *array, const char *line, size_t cb_line);
+
 #ifdef __cplusplus
 }
 #endif

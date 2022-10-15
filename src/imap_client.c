@@ -76,7 +76,7 @@ struct imap_credentials * imap_credentials_load(struct imap_credentials *cred, c
 	
 	cred->server = strdup(server);
 	cred->user = strdup(user);
-	cred->secret = strdup(auth_type);
+	cred->secret = strdup(secret);
 	cred->auth_type = strdup(auth_type);
 	if(jcredentials) json_object_put(jcredentials);
 	
@@ -126,13 +126,16 @@ struct imap_credentials *imap_credentials_copy(struct imap_credentials *dst, con
 }
 
 
-struct imap_command *imap_command_new(const char *tag, const char *command, const char *params)
+struct imap_command *imap_command_new(long tag_index, const char *command, const char *params)
 {
-	assert(tag && command);
+	#define TAG_FMT "A%.6ld" 
+	assert(tag_index >= 0 && NULL != command);
 	struct imap_command *cmd = calloc(1, sizeof(*cmd));
 	assert(cmd);
 	
-	strncpy(cmd->tag, tag, sizeof(cmd->tag));
+	if(tag_index >= 0) {
+		snprintf(cmd->tag, sizeof(cmd->tag) - 1, TAG_FMT, tag_index);
+	}
 	cmd->command = strdup(command);
 	if(params) cmd->params = strdup(params);
 	return cmd;
@@ -146,6 +149,53 @@ void imap_command_free(struct imap_command *cmd)
 	memset(cmd, 0, sizeof(*cmd));
 	free(cmd);
 }
+
+size_t imap_command_to_string(const struct imap_command *cmd, char **p_command) 
+{
+	ssize_t cb_tag = strlen(cmd->tag);
+	ssize_t cb_command = strlen(cmd->command);
+	ssize_t cb_params = cmd->params?strlen(cmd->params):0;
+	
+	ssize_t total_bytes = 0;
+	
+	if(cb_tag > 0) total_bytes = cb_tag + 1;
+	if(cb_command) total_bytes += cb_command;
+	if(cb_params) total_bytes += 1 + cb_params;
+	total_bytes += sizeof("\r\n") - 1; 
+	
+	if(NULL == p_command) return total_bytes + 1;
+	
+	char *sz_command = *p_command;
+	if(NULL == sz_command) {
+		sz_command = calloc(total_bytes + 1, 1);
+		assert(sz_command);
+		*p_command = sz_command;
+	}
+	char *p = sz_command;
+	
+	if(cb_tag > 0) {
+		memcpy(p, cmd->tag, cb_tag); 
+		p+= cb_tag;
+		*p++ = ' ';
+	}
+	
+	memcpy(p, cmd->command, cb_command); 
+	p += cb_command;
+	
+	if(cb_params > 0) {
+		*p++ = ' ';
+		memcpy(p, cmd->params, cb_params); 
+		p += cb_params;
+	}
+	
+	*p++ = '\r'; *p++ = '\n'; *p = '\0';
+	
+	assert((p - sz_command) == total_bytes);
+	
+	return total_bytes;
+}
+
+
 
 struct imap_private
 {
@@ -170,30 +220,24 @@ struct imap_private
 	
 	// 
 	pthread_mutex_t in_mutex;
-	struct imap_buffer *current;
-	struct imap_buffer_array in_bufs[1];
-	
+	struct imap_buffer buffer[1];
 };
 
 static void imap_private_free(struct imap_private *priv)
 {
 	debug_printf("%s(%p)...\n", __FUNCTION__, priv);
 	
-	if(priv->socket_fd != -1) {
-		if(priv->imap) priv->imap->disconnect(priv->imap);
-		
-		assert(priv->socket_fd == -1);
+	if(priv->imap) {
+		priv->imap->disconnect(priv->imap);
+	}
+	
+	if(priv->buffer->data) {
+		imap_buffer_clear(priv->buffer);
 	}
 	
 	clib_queue_cleanup(priv->command_queue, (void (*)(void *))imap_command_free);
 	clib_queue_cleanup(priv->pending_commands, (void (*)(void *))imap_command_free);
-	
-	if(priv->current) {
-		imap_buffer_clear(priv->current);
-		priv->current = NULL;
-	}
-	imap_buffer_array_cleanup(priv->in_bufs);
-	
+		
 	pthread_mutex_destroy(&priv->in_mutex);
 	pthread_mutex_destroy(&priv->queue_mutex);
 	pthread_mutex_destroy(&priv->mutex);
@@ -208,6 +252,7 @@ static struct imap_private *imap_private_new(struct imap_client_context *imap)
 	struct imap_private *priv = calloc(1, sizeof(*priv));
 	assert(priv);
 	priv->imap = imap;
+	
 	int rc = pthread_mutex_init(&priv->mutex, NULL);
 	assert(0 == rc);
 	
@@ -223,8 +268,12 @@ static struct imap_private *imap_private_new(struct imap_client_context *imap)
 	rc = gnutls_init(&priv->session, GNUTLS_CLIENT | GNUTLS_NONBLOCK);
 	assert(rc >= 0);
 	
+	imap_buffer_init(priv->buffer, 65536);
+	
 	return priv;
 }
+
+
 
 
 #define gnutls_check_error(ret_code) do { \
@@ -236,7 +285,79 @@ static struct imap_private *imap_private_new(struct imap_client_context *imap)
 		} \
 	}while(0)
 	
-static int imap_client_connect2(struct imap_private *priv, struct imap_credentials *credentials)
+	
+static int imap_get_response(struct imap_private *priv, 
+	gnutls_session_t session, 
+	struct imap_buffer *buf,
+	const char *tag, size_t cb_tag,
+	struct lines_array *p_result_lines
+)
+{
+	int rc = 0;
+	if(NULL == buf) buf = priv->buffer;
+	struct lines_array *array = p_result_lines;
+	if(NULL == array) {
+		array = calloc(1, sizeof(*array));
+		assert(array);
+	}
+	const int timeout = 1000;
+	while(!priv->quit) {
+		char data[4096] = "";
+		ssize_t cb_available = 0;
+		ssize_t cb = 0;
+		cb_available = gnutls_record_check_pending(session);
+		while(cb_available > 0) {
+			size_t size = sizeof(data) - 1;
+			if(size > cb_available) size = cb_available;
+			
+			cb = gnutls_record_recv(session, data, size);
+			assert(cb > 0);
+			assert(cb == size);
+			
+			imap_buffer_push_data(buf, data, cb);
+			cb_available -= size;
+		}
+		
+		if(buf->length > 0) {
+			rc = imap_buffer_to_lines_array(buf, array, tag, cb_tag);
+			if(rc <= 0) break; 
+		}
+		
+		struct pollfd pfd[1] = {{
+			.fd = priv->socket_fd,
+			.events = POLLIN,
+		}};
+		int n = poll(pfd, 1, timeout);
+		if(n == 0) {
+			debug_printf("poll in timeout\n");
+			continue;
+		}
+		if(n == -1) {
+			rc = errno;
+			break;
+		}
+		
+		cb = gnutls_record_recv(session, data, sizeof(data) - 1);
+		if(cb < 0) {
+			if(cb == GNUTLS_E_AGAIN || cb == GNUTLS_E_INTERRUPTED) continue;
+			rc = cb;
+			break;
+		}
+		rc = imap_buffer_push_data(buf, data, cb);
+		assert(0 == rc);
+		
+		rc = imap_buffer_to_lines_array(buf, array, tag, cb_tag);
+		if(rc <= 0) break;
+	}
+	
+	if(NULL == p_result_lines) {
+		lines_array_clear(array);
+		free(array);
+	}
+	return rc;
+}
+
+static int imap_client_connect2(struct imap_private *priv, const struct imap_credentials *credentials)
 {
 	debug_printf("%s(%p)...\n", __FUNCTION__, priv);
 	
@@ -340,123 +461,82 @@ static int imap_client_connect2(struct imap_private *priv, struct imap_credentia
 		gnutls_x509_crt_deinit(cert);
 
 	}
+	
+	// waiting for server response
+	debug_printf("waiting for server response ...\n");
+	//~ int num_retries = 5;
+	//~ const int timeout = 5000;
+	
+	struct lines_array array[1];
+	memset(array, 0, sizeof(array));
+	
+	struct imap_buffer tmp_buf[1];
+	memset(tmp_buf, 0, sizeof(tmp_buf));
+	
+	rc = imap_get_response(priv, session, tmp_buf, NULL, 0, array);
+	assert(0 == rc);
+	
+	
+	//~ struct imap_buffer *buf = priv->buffer;
+	
+	
+	//~ while(!priv->quit && num_retries-- > 0) {
+		//~ char data[4096] = "";
+		//~ ssize_t cb = 0;
+		//~ ssize_t cb_available = gnutls_record_check_pending(session);
+		
+		//~ rc = 1;	// need more data
+		//~ while(cb_available > 0) {
+			//~ ssize_t size = sizeof(data);
+			//~ if(size > cb_available) size = cb_available;
+			
+			//~ cb = gnutls_record_recv(session, data, size);
+			//~ if(cb < 0) {
+				//~ rc = cb;
+				//~ break;
+			//~ }
+			
+			//~ imap_buffer_push_data(buf, data, cb);
+			//~ cb_available -= cb;
+		//~ }
+		//~ if(rc < 0) break;
+		
+		//~ if(buf->length > 0) {
+			//~ rc = imap_buffer_to_lines_array(buf, array, NULL, 0);
+			//~ if(rc <= 0) break;
+		//~ }
+	
+		//~ struct pollfd pfd[1] = {{
+			//~ .fd = socket_fd,
+			//~ .events = POLLIN,
+		//~ }};
+		
+		//~ while(!priv->quit) {
+			//~ int n = poll(pfd, 1, timeout);
+			//~ if(n == 0) continue;
+			//~ if(n == -1) {
+				//~ rc = errno;
+				//~ break;
+			//~ }
+			
+			//~ rc = 0;
+			//~ cb = gnutls_record_recv(session, data, sizeof(data) - 1);
+			//~ if(cb < 0) {
+				//~ rc = cb;
+				//~ if(rc == GNUTLS_E_AGAIN || rc == GNUTLS_E_INTERRUPTED) continue;
+				//~ break;
+			//~ }
+			//~ assert(cb > 0);
+			//~ imap_buffer_push_data(buf, data, cb);
+			//~ rc = imap_buffer_to_lines_array(buf, array, NULL, 0);
+			//~ if(rc <= 0) break;
+		//~ }
+		//~ if(rc <= 0) break;
+	//~ }
+	
+	lines_array_clear(array);
+	imap_buffer_clear(tmp_buf);
 	return 0;
-}
-
-
-static void *imap_client_thread(void *user_data)
-{
-	assert(user_data);
-	int rc = 0;
-	struct imap_client_context *imap = user_data;
-	debug_printf("%s(%p)...\n", __FUNCTION__, imap);
-	
-	assert(imap && imap->priv);
-	struct imap_private *priv = imap->priv;
-	struct imap_credentials *credentials = priv->credentials;
-	
-	rc = imap_client_connect2(priv, credentials);
-	if(rc) {
-		pthread_exit((void *)(intptr_t)-1);
-		return (void *)(intptr_t)-1;	// compatible with win32
-	}
-	
-	gnutls_session_t session = priv->session;
-	assert(priv->socket_fd);
-	assert(session);
-	
-	sigset_t sigs;
-	sigemptyset(&sigs);
-	sigaddset(&sigs, SIGPIPE);
-	sigaddset(&sigs, SIGUSR1);
-	sigaddset(&sigs, SIGINT);
-	sigaddset(&sigs, SIGHUP);
-	
-	struct pollfd pfd[1];
-	
-	struct timespec timeout = {
-		.tv_sec = 1,	// 
-		.tv_nsec = 0,
-	};
-	while(!priv->quit)
-	{
-		memset(pfd, 0, sizeof(pfd));
-		pfd[0].fd = priv->socket_fd;
-		pfd[0].events = POLLIN;
-		
-		
-		pthread_mutex_lock(&priv->queue_mutex);
-		if(priv->command_queue->length > 0) {
-			pfd[0].events |= POLLOUT;
-		}
-		pthread_mutex_unlock(&priv->queue_mutex);
-		
-		int n = ppoll(pfd, 1, &timeout, &sigs);
-		if(n == 0) continue; // timeout
-		if(n == -1) {
-			rc = errno;
-			break;
-		}
-		
-		assert(pfd[0].fd == priv->socket_fd);
-		if(!((pfd[0].revents & POLLIN) || (pfd[0].revents & POLLOUT)) ) {
-			perror("ppoll()");
-			rc = errno;
-			break;
-		}
-		
-		if(pfd[0].revents & POLLIN) {
-			char data[4096] = "";
-			ssize_t cb = gnutls_record_recv(session, data, sizeof(data) - 1);
-			if(cb <= 0) {
-				if(cb != GNUTLS_E_AGAIN) {
-					rc = cb;
-					gnutls_check_error(rc);
-					break;
-				}
-				continue;
-			}
-			data[cb] = '\0';
-			printf("%s\n", data);
-			
-			pthread_mutex_lock(&priv->in_mutex);
-			struct imap_buffer *current = priv->current;
-			if(NULL == current) {
-				current = imap_buffer_init(NULL, 4096);
-				assert(current);
-				priv->current = current;
-			}
-			
-			char *p_nextline = strrchr(data, '\n');
-			if(NULL == p_nextline) {
-				imap_buffer_push_data(current, data, cb);
-			}else {
-				++p_nextline;
-				size_t length = p_nextline - data;
-				imap_buffer_push_data(current, data, length);
-				if(imap->on_response) {
-					imap->on_response(imap, current->data, current->length);
-				}else {
-					fprintf(stderr, "%s", current->data);
-				}
-				
-				if(length < cb) {
-					current->length = 0;
-					current->start_pos = 0;
-					imap_buffer_resize(current, (cb - length) + 1);
-					imap_buffer_push_data(current, p_nextline, cb - length);
-				}
-				
-			}
-			pthread_mutex_unlock(&priv->mutex);
-		}
-		
-		if(pfd[0].revents & POLLOUT) {
-			///< @todo
-		}
-
-	}
-	pthread_exit((void *)(intptr_t)rc);
 }
 
 static int imap_connect(struct imap_client_context *imap, const struct imap_credentials *credentials)
@@ -472,12 +552,15 @@ static int imap_connect(struct imap_client_context *imap, const struct imap_cred
 		return 1; // already connected
 	}
 	
-	imap_credentials_copy(priv->credentials, credentials);
 	
-	rc = pthread_create(&priv->th, NULL, imap_client_thread, imap);
-	assert(0 == rc);
+	imap_credentials_copy(priv->credentials, credentials);
 	pthread_mutex_unlock(&priv->mutex);
 	
+	
+	//rc = pthread_create(&priv->th, NULL, imap_client_thread, imap);
+	rc = imap_client_connect2(priv, credentials);
+	assert(0 == rc);
+
 	return rc;
 }
 
@@ -488,32 +571,260 @@ static int imap_disconnect(struct imap_client_context *imap)
 	struct imap_private *priv = imap->priv;
 	assert(priv);
 	
-	if(priv->connection_status < 0) return -1;
-	
-	pthread_mutex_lock(&priv->mutex);
-	if(!priv->quit) { 
-		priv->quit = 1;
-		pthread_mutex_unlock(&priv->mutex);
-		
-		if(priv->connection_status > 0) {
-			priv->connection_status = 0;
-			priv->exit_code = NULL;
-			rc = pthread_join(priv->th, &priv->exit_code);
-			debug_printf("imap thread exited with code %p, rc = %d", priv->exit_code, rc);
-		}
-		
-		pthread_mutex_lock(&priv->mutex);
+	if(priv->session) {
+		priv->session = NULL;
+		gnutls_deinit(priv->session);
+		priv->session = NULL;
 	}
 	
 	if(priv->socket_fd != -1) {
-		if(priv->session) {
-			priv->session = NULL;
-			gnutls_deinit(priv->session);
-			priv->session = NULL;
-		}
 		close_socket(priv->socket_fd);
 	}
-	pthread_mutex_unlock(&priv->mutex);
+	imap_buffer_clear(priv->buffer);
+	return rc;
+}
+
+static int imap_request(struct imap_private *priv, gnutls_session_t session, const struct imap_command *cmd)
+{
+	char *sz_command = NULL;
+	ssize_t cb_command = imap_command_to_string(cmd, &sz_command);
+	printf("command: [%s]\n", sz_command);
+	
+	assert(cb_command > 0);
+	struct pollfd pfd[1] = {{
+		.fd = priv->socket_fd,
+		.events = POLLOUT,
+	}};
+	
+	int rc = 0;
+	const int timeout = 1000; 
+	while(!priv->quit) {
+		pfd[0].events = POLLOUT;
+		pfd[0].revents = 0;
+		
+		int n = poll(pfd, 1, timeout);
+		if(n == 0) {
+			debug_printf("poll out timeout\n");
+			continue;
+		}
+		if(n == -1) {
+			rc = errno;
+			break;
+		}
+		if(pfd[0].revents & POLLOUT) {
+			ssize_t cb = gnutls_record_send(session, sz_command, cb_command);
+			if(cb < 0) {
+				if(cb == GNUTLS_E_AGAIN || cb == GNUTLS_E_INTERRUPTED) continue;
+				rc = cb;
+			}
+		}else {
+			rc = errno;
+		}
+		break;
+	}
+	
+	free(sz_command);
+	return rc;
+}
+
+
+static int lines_array_to_json(struct lines_array *array, const char *tag, ssize_t cb_tag, json_object **p_jresult)
+{
+	int rc = 0;
+	json_object *jresult = json_object_new_object();
+	if(p_jresult) *p_jresult = jresult;
+	
+	json_object *jmessages = json_object_new_array();
+	json_object *jdata_lines = json_object_new_array();
+	
+	json_object_object_add(jresult, "messages", jmessages);
+	
+	
+	for(size_t i = 0; i < array->length; ++i) {
+		// dump line
+		char *line = array->lines[i];
+		printf("parse line[%d]: %s\n", (int)i, line);
+		
+		char *token = NULL;
+		char *p = line;
+		if(NULL == p) continue;
+		
+		if(*p == '*') { // message lines
+			json_object_array_add(jmessages, json_object_new_string(line));
+			
+		}else if(cb_tag > 0 && strncasecmp(p, tag, cb_tag) == 0 && p[cb_tag] == ' ') { // command status line
+			p += cb_tag + 1;
+			char *status = strtok_r(p, " \r\n", &token);
+			if(NULL == status) {
+				rc = -1;
+				break;
+			}
+			json_object_object_add(jresult, "status", json_object_new_string(status));
+			
+			char *desc = strtok_r(NULL, "\r\n", &token);
+			json_object_object_add(jresult, "status_desc", json_object_new_string(desc?desc:""));
+		}else { // data lines
+			json_object_array_add(jdata_lines, json_object_new_string(line));
+		}
+	}
+	
+	if(json_object_array_length(jdata_lines) > 0) {
+		json_object_object_add(jresult, "data", jdata_lines);
+	}
+	json_object_object_add(jresult, "ret_code", json_object_new_int(rc));
+	
+	if(NULL == p_jresult) json_object_put(jresult);
+	return rc;
+}
+
+static int imap_client_send_command(struct imap_client_context *imap, const char *command, const char *params, json_object **p_jresult)
+{
+	debug_printf("%s(%p)...\n", __FUNCTION__, imap);
+	int rc = 0;
+	struct imap_private *priv = imap->priv;
+	assert(priv && priv->session);
+	
+	gnutls_session_t session = priv->session;
+	struct imap_command *cmd = NULL;
+	
+	if(NULL == command) cmd = imap_command_new(-1, params, NULL);	// send partial requests
+	else cmd = imap_command_new(++priv->tag_index, command, params);
+	assert(cmd);
+	
+	rc = imap_request(priv, session, cmd);
+	if(rc != 0) {
+		debug_printf("send command failed. tag=%s, command=%s, rc = %d\n", cmd->tag, cmd->command, rc);
+		imap_command_free(cmd);
+		return rc;
+	}
+
+	struct lines_array array[1];
+	memset(array, 0, sizeof(array));
+	
+	imap_buffer_clear(priv->buffer);
+	rc = imap_get_response(priv, session, NULL, cmd->tag, strlen(cmd->tag), array);
+	if(rc != 0) {
+		debug_printf("get response failed. tag=%s, command=%s, rc = %d\n", cmd->tag, cmd->command, rc);
+		imap_command_free(cmd);
+		lines_array_clear(array);
+		return rc;
+	}
+	
+	const char *tag = cmd->tag;
+	ssize_t cb_tag = strlen(tag);
+	rc = lines_array_to_json(array, tag, cb_tag, p_jresult);
+
+	lines_array_clear(array);
+	imap_command_free(cmd);
+	return rc;
+}
+
+
+
+static int imap_client_query_capabilities(struct imap_client_context *imap, json_object **p_jresult)
+{
+	static const char command[] = "CAPABILITY";
+	return imap->send_command(imap, command, NULL, p_jresult);
+}
+
+static ssize_t make_credential_data(const struct imap_credentials	*credentials, char **p_b64)
+{
+	const char *user = credentials->user;
+	const char *secret = credentials->secret;
+	assert(user && secret);
+	
+	gnutls_datum_t cred[1] = {{ NULL }};
+	gnutls_datum_t b64[1] = {{ NULL }};
+	
+	int cb_user = strlen(user);
+	int cb_secret = strlen(secret);
+	assert(cb_user > 0 && cb_secret > 0);
+	
+	cred->data = calloc(1 + cb_user + 1 + cb_secret + 1, 1);
+	assert(cred->data);
+	unsigned char *p = cred->data;
+	*p++ = '\0';
+	memcpy(p, user, cb_user);
+	p += cb_user;
+	
+	*p++ = '\0';
+	memcpy(p, secret, cb_secret);
+	p += cb_secret;
+	cred->size = p - cred->data;
+	
+	
+	int rc = gnutls_base64_encode2(cred, b64);
+	assert(0 == rc);
+	
+	ssize_t cb = b64->size;
+	*p_b64 = (char *)b64->data;
+	
+	for(size_t i = 0; i < cred->size; ++i) {
+		if(i && (i % 16) == 0) printf("\n");
+		printf("%.2x ", cred->data[i]);
+	}
+	printf("\n");
+	free(cred->data);
+	
+	return cb;
+}
+static int imap_client_authenticate(struct imap_client_context *imap, const struct imap_credentials *credentials, json_object **p_jresult)
+{
+	static const char command[] = "AUTHENTICATE PLAIN";
+	debug_printf("%s(%p)...\n", __FUNCTION__, imap);
+	
+	int rc = 0;
+	struct imap_private *priv = imap->priv;
+	assert(priv && priv->session);
+	
+	gnutls_session_t session = priv->session;
+	struct imap_command *cmd = NULL;
+	
+	cmd = imap_command_new(++priv->tag_index, command, NULL);
+	assert(cmd);
+	
+	const char *tag = cmd->tag;
+	ssize_t cb_tag = strlen(tag);
+	
+	rc = imap_request(priv, session, cmd);
+	assert(0 == rc);
+	// check result
+	
+
+	struct imap_buffer tmp_buf[1];
+	memset(tmp_buf, 0, sizeof(tmp_buf));
+	
+	struct lines_array array[1];
+	memset(array, 0, sizeof(array));
+	rc = imap_get_response(priv, session, tmp_buf, NULL, 0, array);
+	assert(0 == rc);
+	imap_buffer_clear(tmp_buf);
+	
+	assert(array->length > 0);
+	if(array->lines[0][0] != '+') {
+		lines_array_clear(array);
+		imap_command_free(cmd);
+		exit(1);
+	}
+	
+	
+	
+	
+	
+	if(NULL == credentials) credentials = priv->credentials;
+	char *b64 = NULL;
+	ssize_t cb_data = make_credential_data(credentials, &b64);
+	assert(cb_data > 0);
+	rc = imap_request(priv, session, &(struct imap_command){.command = (char*)b64,});
+	assert(0 == rc);
+	free(b64);
+	
+	lines_array_clear(array);
+	rc = imap_get_response(imap->priv, session, NULL, tag, cb_tag, array);
+	assert(0 == rc);
+	
+	lines_array_clear(array);
+	imap_command_free(cmd);
 	return rc;
 }
 
@@ -527,6 +838,10 @@ struct imap_client_context * imap_client_context_init(struct imap_client_context
 	imap->connect = imap_connect;
 	imap->disconnect = imap_disconnect;
 	
+	imap->query_capabilities = imap_client_query_capabilities;
+	imap->authenticate = imap_client_authenticate;
+	imap->send_command = imap_client_send_command;
+	
 	imap->priv = imap_private_new(imap);
 	assert(imap->priv);
 	
@@ -536,8 +851,6 @@ void  imap_client_context_cleanup(struct imap_client_context *imap)
 {
 	debug_printf("%s(%p)...\n", __FUNCTION__, imap);
 	if(NULL == imap) return;
-	
-	imap_disconnect(imap);
 	imap_private_free(imap->priv);
 	return;
 }
@@ -546,15 +859,18 @@ void  imap_client_context_cleanup(struct imap_client_context *imap)
 #include <getopt.h>
 #include "app.h"
 
+struct imap_client_context *app_get_imap_client(struct app_context *app);
 int main(int argc, char **argv)
 {
+	gnutls_global_init();
+	
 	struct app_context *app = app_context_init(NULL, argc, argv, NULL);
 	assert(app);
 	printf("work_dir: %s\n", app->work_dir);
-	
+
 	struct imap_client_context *imap = imap_client_context_init(NULL, app);
 	assert(imap);
-	
+
 	struct imap_credentials cred[1];
 	memset(cred, 0, sizeof(cred));
 	imap_credentials_load(cred, NULL, NULL);
@@ -568,14 +884,54 @@ int main(int argc, char **argv)
 	int rc = imap->connect(imap, cred);
 	assert(0 == rc);
 	
+
+	json_object *jresult = NULL;
+	rc = imap->query_capabilities(imap, &jresult);
+	
+	if(jresult) {
+		fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_C_TO_STRING_PRETTY));
+		json_object_put(jresult);
+		jresult = NULL;
+	}
+	
+	rc = imap->authenticate(imap, NULL, &jresult);
+	assert(0 == rc);
+	if(jresult) {
+		fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_C_TO_STRING_PRETTY));
+		json_object_put(jresult);
+		jresult = NULL;
+	}
+	
 	char buf[1024] = "";
 	char *line = NULL;
 	while((line = fgets(buf, sizeof(buf) - 1, stdin)))
 	{
 		if(line[0] == 'q' || line[0] == 'Q') break;
+		
+		int cb = strlen(line);
+		if(cb > 0) {
+			if(line[cb - 1] == '\n') {
+				line[--cb] = '\0';
+				if(cb > 0 && line[cb - 1] == '\r') line[--cb] = '\0';
+			}
+			
+			if(cb > 0) {
+				rc = imap->send_command(imap, line, NULL, &jresult);
+				printf("rc: %d\n", rc);
+				if(jresult) {
+					fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_C_TO_STRING_PRETTY));
+					json_object_put(jresult);
+					jresult = NULL;
+				}
+			}
+		}
+		
 	}
-	
 	imap_client_context_cleanup(imap);
+	app_context_cleanup(app);
+	
+	gnutls_global_deinit();
 	return 0;
 }
+
 #endif

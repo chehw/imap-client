@@ -30,6 +30,8 @@
 #include <assert.h>
 
 #include "imap_client.h"
+#include "utils.h"
+
 struct imap_buffer *imap_buffer_init(struct imap_buffer *_buffer, size_t size)
 {
 	struct imap_buffer *buffer = _buffer;
@@ -157,4 +159,52 @@ void imap_buffer_array_cleanup(struct imap_buffer_array *array)
 		free(array->items);
 	}
 	memset(array, 0, sizeof(*array));
+}
+
+
+int imap_buffer_to_lines_array(struct imap_buffer *buf, struct lines_array *array, const char *tag, size_t cb_tag)
+{
+	if(tag && cb_tag == -1) cb_tag = strlen(tag);
+	
+	const char *data = buf->data;
+	size_t length = buf->length;
+	if(NULL == data || length == -1) return -1;
+	if(length == 0) return 1; // need more data
+	
+	const char *p = data;
+	const char *p_end = data + length;
+	char *p_nextline = NULL;
+	
+	int rc = 1;
+	while(p < p_end) {
+		p_nextline = strchr(p, '\n');
+		if(NULL == p_nextline) break; 
+		
+		++p_nextline;
+		size_t cb = p_nextline - p;
+		
+		char *line = lines_array_add(array, p, cb);
+		assert(line);
+		debug_printf("tag: %s, line: %s", tag, line);
+		
+		p = p_nextline;
+		if(tag && cb_tag > 0) {
+			if(strncasecmp(line, tag, cb_tag) == 0) {
+				rc = 0;
+				break;
+			}
+		}
+	}
+	
+	if(rc >= 0) {
+		assert(p <= p_end);
+		size_t bytes_left = p_end - p;
+		if(bytes_left) memmove(buf->data, p, bytes_left);
+		
+		buf->length = bytes_left;
+		buf->data[buf->length] = '\0';
+		
+		if(p == p_end && NULL == tag) rc = 0;
+	}
+	return rc;
 }

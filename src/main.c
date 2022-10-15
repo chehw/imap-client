@@ -54,6 +54,8 @@ int main(int argc, char **argv)
 	assert(0 == rc);
 	
 	rc = app->run(app);
+	
+	app_context_cleanup(app);
 	return rc;
 }
 

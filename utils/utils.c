@@ -327,7 +327,7 @@ int clib_queue_resize(struct clib_queue *queue, size_t new_size)
 	static const size_t alloc_size = 4096;
 	if(new_size == 0) new_size = alloc_size;
 	else new_size = (new_size + alloc_size - 1) / alloc_size * alloc_size;
-	if(new_size <= queue->size) return -1;
+	if(new_size <= queue->size) return 0;
 	
 	void **items = realloc(queue->items, new_size * sizeof(*items));
 	assert(items);
@@ -384,6 +384,63 @@ void clib_queue_cleanup(struct clib_queue *queue, void (*free_item)(void *))
 	memset(queue, 0, sizeof(*queue));
 	return;
 }
+
+/******************************************************************************
+struct lines_array
+{
+	size_t size;
+	size_t length;
+	char **lines;
+};
+******************************************************************************/
+void lines_array_clear(struct lines_array *array)
+{
+	if(NULL == array) return;
+	if(array->lines) {
+		for(size_t i = 0; i < array->length; ++i) {
+			free(array->lines[i]);
+			array->lines[i] = NULL;
+		}
+		free(array->lines);
+	}
+	memset(array, 0, sizeof(*array));
+	return;
+}
+int lines_array_resize(struct lines_array *array, size_t new_size)
+{
+	static const size_t alloc_size = 1024;
+	
+	if(new_size == 0) new_size = alloc_size;
+	else new_size = (new_size + alloc_size - 1) / alloc_size *alloc_size;
+	if(new_size <= array->size) return 0;
+	
+	char **lines = realloc(array->lines, new_size * sizeof(*lines));
+	assert(lines);
+	memset(lines + array->size, 0, (new_size - array->size) * sizeof(*lines));
+	
+	array->lines = lines;
+	array->size = new_size;
+	return 0;
+}
+
+char *lines_array_add(struct lines_array *array, const char *line, size_t cb_line)
+{
+	if(NULL == line) return NULL;
+	
+	int rc = lines_array_resize(array, array->length + 1);
+	assert(0 == rc);
+	
+	if(cb_line == 0) cb_line = strlen(line);
+	
+	char *new_line = calloc(cb_line + 1, 1);
+	assert(new_line);
+	if(cb_line > 0) memcpy(new_line, line, cb_line);
+	new_line[cb_line] = '\0';
+	
+	array->lines[array->length++] = new_line;
+	return new_line;
+}
+
 
 #if defined(TEST_UTILS_) && defined(_STAND_ALONE)
 

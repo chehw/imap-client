@@ -5,7 +5,9 @@
 extern "C" {
 #endif
 
+#include <stdint.h>
 #include <json-c/json.h>
+#include "utils.h"
 
 struct imap_buffer
 {
@@ -24,6 +26,8 @@ void imap_buffer_clear(struct imap_buffer *buffer);
 #define imap_buffer_unref(buffer) do { \
 		if((buffer->refs > 0) && (0 == --buffer->refs)) { imap_buffer_clear(buffer); free(buffer); }; \
 	} while(0)
+
+int imap_buffer_to_lines_array(struct imap_buffer *buf, struct lines_array *array, const char *tag, size_t cb_tag);
 
 
 struct imap_buffer_array
@@ -48,14 +52,16 @@ struct imap_credentials * imap_credentials_load(struct imap_credentials *cred, c
 void imap_credentials_clear(struct imap_credentials *cred);
 struct imap_credentials *imap_credentials_copy(struct imap_credentials *dst, const struct imap_credentials *src);
 
+
+#define IMAP_TAG_SIZE (16)
 struct imap_command
 {
-	char tag[16];
+	char tag[IMAP_TAG_SIZE];
 	char *command;
 	char *params;
 	int status;	// 0: pending, 1: ok, -1: error
 };
-struct imap_command *imap_command_new(const char *tag, const char *command, const char *params);
+struct imap_command *imap_command_new(long tag_index, const char *command, const char *params);
 void imap_command_free(struct imap_command *command);
 
 
@@ -78,7 +84,9 @@ struct imap_client_context
 	int (*connect)(struct imap_client_context *imap, const struct imap_credentials *credentials);
 	int (*disconnect)(struct imap_client_context *imap);
 	
-	int (*on_response)(struct imap_client_context *imap, const char *data, size_t length);
+	int (*query_capabilities)(struct imap_client_context *imap, json_object **p_jresult);
+	int (*authenticate)(struct imap_client_context *imap, const struct imap_credentials *credentials, json_object **p_jresult);
+	int (*send_command)(struct imap_client_context *imap, const char *command, const char *params, json_object **p_jresult);
 };
 
 struct imap_client_context * imap_client_context_init(struct imap_client_context *imap, void *user_data);

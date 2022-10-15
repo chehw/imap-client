@@ -61,6 +61,12 @@ struct app_private
 	
 };
 
+struct imap_client_context *app_get_imap_client(struct app_context *app)
+{
+	if(NULL == app || NULL == app->priv) return NULL;
+	return app->priv->imap;
+}
+
 struct mail_db_context *app_get_mail_db(struct app_context *app)
 {
 	if(NULL == app || NULL == app->priv) return NULL;
@@ -88,6 +94,7 @@ struct app_private * app_private_new(struct app_context *app)
 }
 void app_private_free(struct app_private *priv)
 {
+	debug_printf("%s(%p) ...\n", __FUNCTION__, priv);
 	if(NULL == priv) return;
 	
 	if(priv->imap) imap_client_context_cleanup(priv->imap);
