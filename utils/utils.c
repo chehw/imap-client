@@ -442,6 +442,22 @@ char *lines_array_add(struct lines_array *array, const char *line, size_t cb_lin
 }
 
 
+
+void dump_printable(const char *data, ssize_t cb, int show_line_endings)
+{
+	const char *p = data;
+	const char *p_end = data + cb;
+	
+	while(p < p_end) {
+		char c = *p++;
+		if(show_line_endings && (c == '\r' || c == '\n')) fprintf(stderr, "\\x%.2x", c);
+		else fprintf(stderr, "%c", c);
+	}
+	fprintf(stderr, "\n");
+	return;
+}
+
+
 #if defined(TEST_UTILS_) && defined(_STAND_ALONE)
 
 #include "../utils/crypto.c"

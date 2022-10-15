@@ -87,6 +87,7 @@ struct imap_client_context
 	int (*query_capabilities)(struct imap_client_context *imap, json_object **p_jresult);
 	int (*authenticate)(struct imap_client_context *imap, const struct imap_credentials *credentials, json_object **p_jresult);
 	int (*send_command)(struct imap_client_context *imap, const char *command, const char *params, json_object **p_jresult);
+	
 };
 
 struct imap_client_context * imap_client_context_init(struct imap_client_context *imap, void *user_data);

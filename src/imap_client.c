@@ -303,7 +303,9 @@ static int imap_get_response(struct imap_private *priv,
 		assert(array);
 	}
 	const int timeout = 1000;
-	while(!priv->quit) {
+	
+	int num_retries = 5;
+	while(!priv->quit && (num_retries-- > 0)) {
 		char data[4096] = "";
 		ssize_t cb_available = 0;
 		ssize_t cb = 0;
@@ -317,7 +319,7 @@ static int imap_get_response(struct imap_private *priv,
 			assert(cb == size);
 			
 			imap_buffer_push_data(buf, data, cb);
-			cb_available -= size;
+			cb_available -= cb;
 		}
 		
 		if(buf->length > 0) {
@@ -350,6 +352,11 @@ static int imap_get_response(struct imap_private *priv,
 		
 		rc = imap_buffer_to_lines_array(buf, array, tag, cb_tag);
 		if(rc <= 0) break;
+	}
+	
+	if(num_retries <= 0) {
+		rc = -1;
+		imap_buffer_clear(buf);
 	}
 	
 	if(NULL == p_result_lines) {
@@ -466,9 +473,6 @@ static int imap_client_connect2(struct imap_private *priv, const struct imap_cre
 	
 	// waiting for server response
 	debug_printf("waiting for server response ...\n");
-	//~ int num_retries = 5;
-	//~ const int timeout = 5000;
-	
 	struct lines_array array[1];
 	memset(array, 0, sizeof(array));
 	
@@ -478,67 +482,9 @@ static int imap_client_connect2(struct imap_private *priv, const struct imap_cre
 	rc = imap_get_response(priv, session, tmp_buf, NULL, 0, array);
 	assert(0 == rc);
 	
-	
-	//~ struct imap_buffer *buf = priv->buffer;
-	
-	
-	//~ while(!priv->quit && num_retries-- > 0) {
-		//~ char data[4096] = "";
-		//~ ssize_t cb = 0;
-		//~ ssize_t cb_available = gnutls_record_check_pending(session);
-		
-		//~ rc = 1;	// need more data
-		//~ while(cb_available > 0) {
-			//~ ssize_t size = sizeof(data);
-			//~ if(size > cb_available) size = cb_available;
-			
-			//~ cb = gnutls_record_recv(session, data, size);
-			//~ if(cb < 0) {
-				//~ rc = cb;
-				//~ break;
-			//~ }
-			
-			//~ imap_buffer_push_data(buf, data, cb);
-			//~ cb_available -= cb;
-		//~ }
-		//~ if(rc < 0) break;
-		
-		//~ if(buf->length > 0) {
-			//~ rc = imap_buffer_to_lines_array(buf, array, NULL, 0);
-			//~ if(rc <= 0) break;
-		//~ }
-	
-		//~ struct pollfd pfd[1] = {{
-			//~ .fd = socket_fd,
-			//~ .events = POLLIN,
-		//~ }};
-		
-		//~ while(!priv->quit) {
-			//~ int n = poll(pfd, 1, timeout);
-			//~ if(n == 0) continue;
-			//~ if(n == -1) {
-				//~ rc = errno;
-				//~ break;
-			//~ }
-			
-			//~ rc = 0;
-			//~ cb = gnutls_record_recv(session, data, sizeof(data) - 1);
-			//~ if(cb < 0) {
-				//~ rc = cb;
-				//~ if(rc == GNUTLS_E_AGAIN || rc == GNUTLS_E_INTERRUPTED) continue;
-				//~ break;
-			//~ }
-			//~ assert(cb > 0);
-			//~ imap_buffer_push_data(buf, data, cb);
-			//~ rc = imap_buffer_to_lines_array(buf, array, NULL, 0);
-			//~ if(rc <= 0) break;
-		//~ }
-		//~ if(rc <= 0) break;
-	//~ }
-	
 	lines_array_clear(array);
 	imap_buffer_clear(tmp_buf);
-	return 0;
+	return rc;
 }
 
 static int imap_connect(struct imap_client_context *imap, const struct imap_credentials *credentials)
@@ -646,7 +592,8 @@ static int lines_array_to_json(struct lines_array *array, const char *tag, ssize
 	for(size_t i = 0; i < array->length; ++i) {
 		// dump line
 		char *line = array->lines[i];
-		printf("parse line[%d]: %s\n", (int)i, line);
+		debug_printf("parse line[%d]: ", (int)i); 
+		dump_printable(line, strlen(line), 1);
 		
 		char *token = NULL;
 		char *p = line;
@@ -704,7 +651,7 @@ static int imap_client_send_command(struct imap_client_context *imap, const char
 	struct lines_array array[1];
 	memset(array, 0, sizeof(array));
 	
-	imap_buffer_clear(priv->buffer);
+
 	rc = imap_get_response(priv, session, NULL, cmd->tag, strlen(cmd->tag), array);
 	if(rc != 0) {
 		debug_printf("get response failed. tag=%s, command=%s, rc = %d\n", cmd->tag, cmd->command, rc);
@@ -863,6 +810,9 @@ void  imap_client_context_cleanup(struct imap_client_context *imap)
 #include "app.h"
 
 struct imap_client_context *app_get_imap_client(struct app_context *app);
+
+//~ static ssize_t list_folders(struct imap_client_context *imap, const char *parent_folder, 
+
 int main(int argc, char **argv)
 {
 	gnutls_global_init();
@@ -891,8 +841,11 @@ int main(int argc, char **argv)
 	json_object *jresult = NULL;
 	rc = imap->query_capabilities(imap, &jresult);
 	
+#define JSON_OUTPUT_FORMAT (JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE)
+	
+	
 	if(jresult) {
-		fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_C_TO_STRING_PRETTY));
+		fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_OUTPUT_FORMAT));
 		json_object_put(jresult);
 		jresult = NULL;
 	}
@@ -900,10 +853,35 @@ int main(int argc, char **argv)
 	rc = imap->authenticate(imap, NULL, &jresult);
 	assert(0 == rc);
 	if(jresult) {
-		fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_C_TO_STRING_PRETTY));
+		fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_OUTPUT_FORMAT));
 		json_object_put(jresult);
 		jresult = NULL;
 	}
+	
+	// list folders
+	rc = imap->send_command(imap, "LIST", "\"\" \"*\"", &jresult);
+	
+	struct lines_array folders_list[1];
+	memset(folders_list, 0, sizeof(folders_list));
+	
+	
+	assert(0 == rc);
+	if(jresult) {
+		fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_OUTPUT_FORMAT));
+		json_object_put(jresult);
+		jresult = NULL;
+	}
+	
+	// select folder
+	rc = imap->send_command(imap, "SELECT", "INBOX", &jresult);
+	assert(0 == rc);
+	if(jresult) {
+		fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_OUTPUT_FORMAT));
+		json_object_put(jresult);
+		jresult = NULL;
+	}
+	
+	
 	
 	char buf[1024] = "";
 	char *line = NULL;

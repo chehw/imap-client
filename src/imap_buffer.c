@@ -29,6 +29,8 @@
 #include <string.h>
 #include <assert.h>
 
+#include <ctype.h>
+
 #include "imap_client.h"
 #include "utils.h"
 
@@ -76,7 +78,7 @@ int imap_buffer_push_data(struct imap_buffer *buffer, char *data, size_t length)
 	
 	char *dst = buffer->data + buffer->start_pos;
 	memcpy(dst, data, length);
-	dst[length + 1] = '\0';
+	dst[length] = '\0';
 	buffer->length += length;
 	
 	return 0;
@@ -161,7 +163,6 @@ void imap_buffer_array_cleanup(struct imap_buffer_array *array)
 	memset(array, 0, sizeof(*array));
 }
 
-
 int imap_buffer_to_lines_array(struct imap_buffer *buf, struct lines_array *array, const char *tag, size_t cb_tag)
 {
 	if(tag && cb_tag == -1) cb_tag = strlen(tag);
@@ -175,6 +176,9 @@ int imap_buffer_to_lines_array(struct imap_buffer *buf, struct lines_array *arra
 	const char *p_end = data + length;
 	char *p_nextline = NULL;
 	
+	fprintf(stderr, "buffer(cb=%ld): ", (long)buf->length);
+	dump_printable((char *)buf->data, buf->length, 1);
+	
 	int rc = 1;
 	while(p < p_end) {
 		p_nextline = strchr(p, '\n');
@@ -185,7 +189,8 @@ int imap_buffer_to_lines_array(struct imap_buffer *buf, struct lines_array *arra
 		
 		char *line = lines_array_add(array, p, cb);
 		assert(line);
-		debug_printf("tag: %s, line: %s", tag, line);
+		fprintf(stderr, "== %s(%d)::tag=%s: ", __FILE__, __LINE__, tag);
+		dump_printable(line, cb, 1);
 		
 		p = p_nextline;
 		if(tag && cb_tag > 0) {

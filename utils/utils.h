@@ -65,7 +65,7 @@ void *clib_queue_leave(struct clib_queue *queue);
 void clib_queue_cleanup(struct clib_queue *queue, void (*free_item)(void *));
 
 
-
+void dump_printable(const char *data, ssize_t cb, int show_line_endings);
 
 struct lines_array
 {
