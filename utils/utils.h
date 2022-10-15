@@ -44,7 +44,7 @@ typedef _Bool boolean;
 #define json_get_value_default(jobj, type, key, def_val) ({ \
 		type value = (type)def_val; \
 		json_object *jvalue = NULL; \
-		json_bool ok = json_object_object_get_ex(jobj, key, &jvalue); \
+		json_bool ok = json_object_object_get_ex(jobj, #key, &jvalue); \
 		if(ok && jvalue) value = (type)json_object_get_##type(jvalue); \
 		value; })
 

@@ -36,6 +36,8 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include <limits.h>
+
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 #include <gnutls/crypto.h>
@@ -637,6 +639,7 @@ static int lines_array_to_json(struct lines_array *array, const char *tag, ssize
 	json_object *jmessages = json_object_new_array();
 	json_object *jdata_lines = json_object_new_array();
 	
+	if(tag) json_object_object_add(jresult, "tag", json_object_new_string(tag));
 	json_object_object_add(jresult, "messages", jmessages);
 	
 	
@@ -919,7 +922,18 @@ int main(int argc, char **argv)
 				rc = imap->send_command(imap, line, NULL, &jresult);
 				printf("rc: %d\n", rc);
 				if(jresult) {
-					fprintf(stderr, "jresult: %s\n", json_object_to_json_string_ext(jresult, JSON_C_TO_STRING_PRETTY));
+					const char *tag = json_get_value(jresult, string, tag);
+					if(tag) {
+						char path_name[200] = "";
+						snprintf(path_name, sizeof(path_name), "%s.json", tag);
+						printf("save to %s\n", path_name);
+						json_object_to_file_ext(path_name, jresult, 
+							JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
+					}else {
+						fprintf(stderr, "jresult: %s\n", 
+							json_object_to_json_string_ext(jresult, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE));
+					}
+					
 					json_object_put(jresult);
 					jresult = NULL;
 				}
