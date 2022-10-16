@@ -39,6 +39,14 @@ case "$target" in
 			$(pkg-config --cflags --libs gnutls gtk+-3.0 webkit2gtk-4.0)
 		;;
 		
+	text-utils)
+		gcc -std=gnu99 -g -Wall -D_DEBUG \
+			-I../include -I../src -I../utils \
+			-DTEST_TEXT_UTILS_ -D_STAND_ALONE \
+			-o test_text-utils ../src/text-utils.c \
+			-lm -lpthread -lgnutls
+		;;
+		
 		
 	*)
 		echo "build nothing."
