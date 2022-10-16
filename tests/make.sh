@@ -5,13 +5,13 @@ target=$(basename ${target})
 target=${target/.[ch]/}
 
 case "$target" in
-	mail_db|bdb_context)
-		gcc -std=gnu99 -g -Wall -I../include -I../src -pthread -D_DEBUG \
-			-DTEST_MAIL_DB_ -D_STAND_ALONE \
-			-o test_mail_db \
-			../src/mail_db.c \
-			-lm -lpthread -ljson-c -ldb
-		;;
+	#~ mail_db|bdb_context)
+		#~ gcc -std=gnu99 -g -Wall -I../include -I../src -pthread -D_DEBUG \
+			#~ -DTEST_MAIL_DB_ -D_STAND_ALONE \
+			#~ -o test_mail_db \
+			#~ ../src/mail_db.c \
+			#~ -lm -lpthread -ljson-c -ldb
+		#~ ;;
 	shell)
 		gcc -std=gnu99 -g -Wall -I../include -I../src \
 			-o shell shell.c \
@@ -46,7 +46,19 @@ case "$target" in
 			-o test_text-utils ../src/text-utils.c \
 			-lm -lpthread -lgnutls
 		;;
-		
+	
+	load-mails|mail_db|bdb_context)
+		echo "target ==> load-mails"
+		gcc -std=gnu99 -g -Wall -D_DEBUG -D_DEFAULT_SOURCE -D_GNU_SOURCE \
+			-DTEST_LOAD_MAILS_ -D_STAND_ALONE \
+			-I../include -I../src -I../utils \
+			-o test_load-mails ../src/load-mails.c \
+			../src/imap_client.c ../src/imap_buffer.c ../src/app.c \
+			../src/mail_db.c ../src/shell.c ../src/bdb_context.c \
+			../utils/utils.c ../utils/crypto.c \
+			-lm -lpthread -ljson-c -ldb \
+			$(pkg-config --cflags --libs gnutls gtk+-3.0 webkit2gtk-4.0)
+		;;
 		
 	*)
 		echo "build nothing."

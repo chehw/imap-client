@@ -128,7 +128,6 @@ static ssize_t quoted_printable_decode(const char *qp_text, ssize_t length, char
 	return cb_dst;
 }
 
-
 /******************************************************************************
 // https://www.rfc-editor.org/rfc/rfc1522
 struct mime_text

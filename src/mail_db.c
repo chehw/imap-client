@@ -68,6 +68,48 @@ label_err:
 	return rc;
 }
 
+
+static int open_databases(struct mail_db_context *mail_db)
+{
+	int rc = 0;
+	static const char *db_filenames[] = {
+		"raw_data.db", 
+		"mails-rfc822.db",
+		NULL
+	};
+	struct bdb_context *db = NULL;
+	size_t num_dbs = sizeof(mail_db->dbs) / sizeof(mail_db->dbs[0]);
+	for(size_t i = 0; i < num_dbs; ++i) {
+		db = bdb_context_init(&mail_db->dbs[i], mail_db->env, mail_db);
+		assert(db);
+		
+		const char *filename = db_filenames[i];
+		if(NULL == filename) continue;
+		rc = db->open(db, filename, NULL, DB_BTREE, 0);
+		if(rc) {
+			db_check_error(rc);
+		}
+	}
+	
+	DB *rawdata_dbp = mail_db->db_raw_data.dbp;
+	DB *mails_dbp = mail_db->db_mails.dbp;
+	assert(rawdata_dbp && mails_dbp);
+	
+	return rc;
+}
+
+static void close_databases(struct mail_db_context *mail_db)
+{
+	assert(mail_db);
+	size_t num_dbs = sizeof(mail_db->dbs) / sizeof(mail_db->dbs[0]);
+	for(size_t i = 0; i < num_dbs; ++i) {
+		struct bdb_context *db = &mail_db->dbs[i];
+		db->close(db);
+		bdb_context_cleanup(db);
+	}
+	return;
+}
+
 struct mail_db_context *mail_db_context_init(struct mail_db_context *mail_db, 
 	const char *db_home, 
 	int use_cdb_mode, // Concurrent Data Store mode (multiple reader / single writer)
@@ -86,7 +128,6 @@ struct mail_db_context *mail_db_context_init(struct mail_db_context *mail_db,
 		return NULL;
 	}
 	
-		
 	if(NULL == mail_db) mail_db = calloc(1, sizeof(*mail_db));
 	assert(mail_db);
 	mail_db->app = app;
@@ -94,12 +135,16 @@ struct mail_db_context *mail_db_context_init(struct mail_db_context *mail_db,
 	struct bdb_environment *env = bdb_environment_init(mail_db->env, db_home, use_cdb_mode, mail_db);
 	assert(env);
 	
+	rc = open_databases(mail_db);
+	assert(0 == rc);
+	
 	return mail_db;
 }
 
 void mail_db_context_cleanup(struct mail_db_context *mail_db)
 {
-	
+	if(NULL == mail_db) return;
+	close_databases(mail_db);
 	bdb_environment_cleanup(mail_db->env);
 }
 

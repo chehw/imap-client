@@ -37,6 +37,7 @@ struct app_context *app_context_init(struct app_context *app, int argc, char **a
 void app_context_cleanup(struct app_context *app);
 
 struct mail_db_context *app_get_mail_db(struct app_context *app);
+struct imap_client_context *app_get_imap_client(struct app_context *app);
 #ifdef __cplusplus
 }
 #endif

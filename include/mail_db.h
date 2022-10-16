@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 #include <db.h>
-
+void db_check_error(int rc);
 
 struct bdb_environment
 {

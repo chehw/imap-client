@@ -305,7 +305,7 @@ static int imap_get_response(struct imap_private *priv,
 	const int timeout = 1000;
 	
 	int num_retries = 5;
-	while(!priv->quit && (num_retries-- > 0)) {
+	while(!priv->quit && (num_retries > 0)) {
 		char data[4096] = "";
 		ssize_t cb_available = 0;
 		ssize_t cb = 0;
@@ -334,6 +334,7 @@ static int imap_get_response(struct imap_private *priv,
 		int n = poll(pfd, 1, timeout);
 		if(n == 0) {
 			debug_printf("poll in timeout\n");
+			--num_retries;
 			continue;
 		}
 		if(n == -1) {
@@ -618,6 +619,8 @@ static int lines_array_to_json(struct lines_array *array, const char *tag, ssize
 		}
 	}
 	
+	debug_printf("%s(): rc = %d\n", __FUNCTION__, rc);
+	
 	if(json_object_array_length(jdata_lines) > 0) {
 		json_object_object_add(jresult, "data", jdata_lines);
 	}
@@ -633,6 +636,8 @@ static int imap_client_send_command(struct imap_client_context *imap, const char
 	int rc = 0;
 	struct imap_private *priv = imap->priv;
 	assert(priv && priv->session);
+	
+	imap_buffer_clear(priv->buffer);
 	
 	gnutls_session_t session = priv->session;
 	struct imap_command *cmd = NULL;

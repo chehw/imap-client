@@ -165,11 +165,13 @@ static int bdb_open(struct bdb_context *db, const char *db_filename, const char 
 }
 static int bdb_close(struct bdb_context *db)
 {
-	assert(db && db->env && db->dbp);
-	int rc = 0;
-	DB *dbp = db->dbp;	
-	rc = dbp->close(dbp, 0);
-	return rc;
+	if(NULL == db) return -1;
+	db->iter_close(db);
+	
+	DB *dbp = db->dbp;
+	db->dbp = NULL;
+	if(dbp) return dbp->close(dbp, 0);
+	return 0;
 }
 
 static int bdb_get(struct bdb_context *db, 
@@ -322,15 +324,12 @@ static int bdb_iter_new(struct bdb_context *db, DB_TXN *txn, uint32_t flags)
 static int bdb_iter_close(struct bdb_context *db)
 {
 	int rc = 0;
-
-	if(db->iter) {
-		rc = db->iter->close(db->iter);
-		db->iter = NULL;
-	}
+	if(NULL == db) return -1;
+	DBC *iter = db->iter;
+	db->iter = NULL;
+	if(iter) rc = iter->close(iter);
 	return rc;
 }
-
-
 
 struct bdb_context *bdb_context_init(struct bdb_context *db, struct bdb_environment *env, void *user_data)
 {
