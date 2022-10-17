@@ -540,6 +540,8 @@ static int imap_disconnect(struct imap_client_context *imap)
 		close_socket(priv->socket_fd);
 	}
 	imap_buffer_clear(priv->buffer);
+	
+	priv->connection_status = -1;
 	return rc;
 }
 

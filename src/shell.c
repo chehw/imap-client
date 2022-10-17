@@ -40,6 +40,27 @@
 #include "imap_client.h"
 #include "mail_utils.h"
 
+
+enum MAILS_TREE_COLUMN
+{
+	MAILS_TREE_COLUMN_subject,	// string
+	MAILS_TREE_COLUMN_uid,		// int64
+	MAILS_TREE_COLUMN_timestamp, // uint64
+	MAILS_TREE_COLUMN_flags,	// int32
+	MAILS_TREE_COLUMN_data_ptr,	// pointer
+	MAILS_TREE_COLUMNS_COUNT
+};
+static inline GtkTreeStore *create_mails_tree_store(void)
+{
+	GtkTreeStore *store = gtk_tree_store_new(MAILS_TREE_COLUMNS_COUNT, 
+		G_TYPE_STRING, 
+		G_TYPE_INT64, 
+		G_TYPE_UINT64, 
+		G_TYPE_INT,
+		G_TYPE_POINTER);
+	return store;
+}
+
 static int shell_init(struct shell_context *shell, json_object *jconfig);
 static int shell_run(struct shell_context *shell);
 static int shell_stop(struct shell_context *shell);
@@ -82,6 +103,10 @@ static void on_show_inspector(GtkWidget *button, WebKitWebView *webview)
 
 static void shell_ui_reset(struct shell_context *shell)
 {
+	assert(shell && shell->app && shell->priv);
+	struct shell_private *priv = shell->priv;
+	GtkTreeStore *store = create_mails_tree_store();
+	gtk_tree_view_set_model(GTK_TREE_VIEW(priv->mail_list), GTK_TREE_MODEL(store));
 	return;
 }
 
@@ -113,14 +138,14 @@ static void on_connect_imap_server(GtkWidget *button, struct shell_context *shel
 	assert(cred);
 	
 	int rc = 0;
-	priv->is_connected = !priv->is_connected;
-	
-	if(!priv->is_connected) {
+	if(NULL == button) button = priv->btn_connect;
+
+	if(priv->is_connected) {
 		imap->disconnect(imap);
 		shell_ui_reset(shell);
-		
-		return;
+		priv->is_connected = 0;
 	}else {
+		gtk_widget_set_sensitive(button, FALSE);
 		rc = imap->connect(imap, cred);
 		if(0 == rc) {
 			rc = imap->query_capabilities(imap, NULL);
@@ -129,7 +154,10 @@ static void on_connect_imap_server(GtkWidget *button, struct shell_context *shel
 			priv->is_connected = 1;
 			shell_load_mails(shell);
 		}
+		gtk_widget_set_sensitive(button, TRUE);
 	}
+	
+	gtk_button_set_label(GTK_BUTTON(button), priv->is_connected?"Disconnect":"connect");
 	return;
 }
 
@@ -242,27 +270,6 @@ static int shell_stop(struct shell_context *shell)
 	gtk_main_quit();
 	return 0;
 }
-
-enum MAILS_TREE_COLUMN
-{
-	MAILS_TREE_COLUMN_subject,	// string
-	MAILS_TREE_COLUMN_uid,		// int64
-	MAILS_TREE_COLUMN_timestamp, // uint64
-	MAILS_TREE_COLUMN_flags,	// int32
-	MAILS_TREE_COLUMN_data_ptr,	// pointer
-	MAILS_TREE_COLUMNS_COUNT
-};
-static inline GtkTreeStore *create_mails_tree_store(void)
-{
-	GtkTreeStore *store = gtk_tree_store_new(MAILS_TREE_COLUMNS_COUNT, 
-		G_TYPE_STRING, 
-		G_TYPE_INT64, 
-		G_TYPE_UINT64, 
-		G_TYPE_INT,
-		G_TYPE_POINTER);
-	return store;
-}
-
 
 int load_test_mail_list(struct shell_context *shell)
 {
