@@ -82,7 +82,7 @@ static int gcloud_service_set_scope(struct gcloud_service_oauth2 *oauth, const c
 	return 0;
 }
 
-static int gcloud_service_request_token(struct gcloud_service_oauth2 *oauth, json_object *p_jresult);
+static int gcloud_service_request_token(struct gcloud_service_oauth2 *oauth, json_object **p_jresult);
 struct gcloud_service_oauth2 *gcloud_service_oauth2_init(struct gcloud_service_oauth2 *oauth, 
 	json_object *jcredentials, void *user_data)
 {
@@ -142,7 +142,7 @@ static size_t on_response(char *ptr, size_t size, size_t n, void *user_data)
 	return 0; // error
 }
 
-static int gcloud_service_request_token(struct gcloud_service_oauth2 *oauth, json_object *p_jresult)
+static int gcloud_service_request_token(struct gcloud_service_oauth2 *oauth, json_object **p_jresult)
 {
 	static char grant_type_encoded[] = "urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer";
 	static char default_scopes[] = "https://www.googleapis.com/auth/cloud-platform";
@@ -196,8 +196,9 @@ static int gcloud_service_request_token(struct gcloud_service_oauth2 *oauth, jso
 	}
 	if(oauth->jerr == json_tokener_success && oauth->jresult) {
 		fprintf(stderr, "token: %s\n", json_object_to_json_string_ext(oauth->jresult, JSON_C_TO_STRING_PRETTY));
+		
+		if(p_jresult) *p_jresult = json_object_get(oauth->jresult); // add_ref
 	}
-	
 	curl_easy_cleanup(curl);
 	curl = NULL;
 	

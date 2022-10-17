@@ -26,7 +26,7 @@ struct gcloud_service_oauth2
 	 * request_token()
 	 * 	@return : jresult = {""access_token":"ya29.c.....", "expires_in":3599,"token_type":"Bearer"}
 	 */
-	int (*request_token)(struct gcloud_service_oauth2 *oauth, json_object *p_jresult);
+	int (*request_token)(struct gcloud_service_oauth2 *oauth, json_object **p_jresult);
 	
 	json_tokener *jtok;
 	json_object *jresult;
