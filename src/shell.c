@@ -84,8 +84,22 @@ static void shell_ui_reset(struct shell_context *shell)
 {
 	return;
 }
-static void shell_load_mails(struct shell_context *shell, struct imap_client_context *imap)
+
+static void load_mailbox_folders(struct shell_context *shell, json_object *jlist);
+static void shell_load_mails(struct shell_context *shell)
 {
+	assert(shell && shell->app && shell->priv);
+	struct shell_private *priv = shell->priv;
+	struct mail_utils *mail = priv->mail;
+	struct imap_client_context *imap = mail->imap;
+	assert(mail && imap);
+	
+	json_object *jlist = NULL;
+	int rc = mail->list(mail, "/", NULL, &jlist);
+	if(0 == rc && jlist) {
+		load_mailbox_folders(shell, jlist);
+	}
+	if(jlist) json_object_put(jlist);
 	return;
 }
 
@@ -109,8 +123,11 @@ static void on_connect_imap_server(GtkWidget *button, struct shell_context *shel
 	}else {
 		rc = imap->connect(imap, cred);
 		if(0 == rc) {
+			rc = imap->query_capabilities(imap, NULL);
+			rc = imap->authenticate(imap, NULL, NULL);
+			assert(0 == rc);
 			priv->is_connected = 1;
-			shell_load_mails(shell, imap);
+			shell_load_mails(shell);
 		}
 	}
 	return;
@@ -226,6 +243,26 @@ static int shell_stop(struct shell_context *shell)
 	return 0;
 }
 
+enum MAILS_TREE_COLUMN
+{
+	MAILS_TREE_COLUMN_subject,	// string
+	MAILS_TREE_COLUMN_uid,		// int64
+	MAILS_TREE_COLUMN_timestamp, // uint64
+	MAILS_TREE_COLUMN_flags,	// int32
+	MAILS_TREE_COLUMN_data_ptr,	// pointer
+	MAILS_TREE_COLUMNS_COUNT
+};
+static inline GtkTreeStore *create_mails_tree_store(void)
+{
+	GtkTreeStore *store = gtk_tree_store_new(MAILS_TREE_COLUMNS_COUNT, 
+		G_TYPE_STRING, 
+		G_TYPE_INT64, 
+		G_TYPE_UINT64, 
+		G_TYPE_INT,
+		G_TYPE_POINTER);
+	return store;
+}
+
 
 int load_test_mail_list(struct shell_context *shell)
 {
@@ -245,26 +282,78 @@ int load_test_mail_list(struct shell_context *shell)
 	int rc = db->open(db, "test1.db", NULL, 0, 0);
 	assert(0 == rc);
 
-	GtkListStore *store = gtk_list_store_new(3, G_TYPE_UINT64, G_TYPE_STRING, G_TYPE_POINTER);
+	
 	rc = db->iter_first(db);
 	
-	GtkTreeIter iter;
+	GtkTreeStore *store = create_mails_tree_store();
+	assert(store);
+	
+	GtkTreeIter parent, iter;
+	gtk_tree_store_append(store, &parent, NULL);
+	gtk_tree_store_set(store, &parent, 
+		MAILS_TREE_COLUMN_subject, "root", 
+		MAILS_TREE_COLUMN_uid, (uint64_t)-1,
+		-1);
+	
 	while(0 == rc) {
 		DBT *key = db->pkey;
-		DBT *value = db->value;
 		uint64_t uid;
 		assert(key->data);
 		assert(key->size == sizeof(uint64_t));
 		
 		uid = *(uint64_t *)key->data;
 		uid = be64toh(uid);
-		gtk_list_store_append(store, &iter);
-		gtk_list_store_set(store, &iter, 0, uid, 1, value->data, -1);
+		gtk_tree_store_append(store, &iter, &parent);
+		gtk_tree_store_set(store, &iter, MAILS_TREE_COLUMN_uid, uid, -1);
 		rc = db->iter_next(db, 0);
 	}
 	
 	gtk_tree_view_set_model(mail_list, GTK_TREE_MODEL(store));
 	return 0;
+}
+
+static void load_mailbox_folders(struct shell_context *shell, json_object *jlist)
+{
+	assert(shell && shell->priv);
+	struct shell_private *priv = shell->priv;
+	struct imap_client_context *imap = priv->mail->imap;
+	assert(imap);
+	const struct imap_credentials *cred = imap_client_get_credentials(imap);
+	assert(cred);
+	
+	GtkTreeView *mail_list = GTK_TREE_VIEW(priv->mail_list);
+	GtkTreeStore *store = create_mails_tree_store();
+	assert(store);
+	
+	GtkTreeIter parent, iter;
+	gtk_tree_store_append(store, &parent, NULL);
+	gtk_tree_store_set(store, &parent, 
+		MAILS_TREE_COLUMN_subject, cred->server,
+		MAILS_TREE_COLUMN_uid, (uint64_t)-1,
+		-1);
+		
+	int count = json_object_array_length(jlist);
+	for(int i = 0; i < count; ++i) {
+		json_object *jitem = json_object_array_get_idx(jlist, i);
+		if(NULL == jitem) continue;
+		
+		const char *folder = json_object_get_string(jitem);
+		assert(folder && folder[0]);
+		
+		gtk_tree_store_append(store, &iter, &parent);
+		gtk_tree_store_set(store, &iter, 
+			MAILS_TREE_COLUMN_subject, folder,
+			MAILS_TREE_COLUMN_uid, (uint64_t)-1,
+			-1);
+	}
+	gtk_tree_view_set_model(mail_list, GTK_TREE_MODEL(store));
+	
+	GtkTreePath *tpath = gtk_tree_path_new_from_string("0");
+	if(tpath) {
+		gtk_tree_view_expand_row(mail_list, tpath, FALSE);
+		gtk_tree_path_free(tpath);
+	}
+	return;
 }
 
 
@@ -281,7 +370,10 @@ static void on_mail_selected_changed(GtkTreeSelection *selection, struct shell_c
 	uint64_t uid = -1;
 	
 	char *subject = NULL;
-	gtk_tree_model_get(model, &iter, 0, &uid, 1, &subject, -1);
+	gtk_tree_model_get(model, &iter, 
+		MAILS_TREE_COLUMN_uid, &uid, 
+		MAILS_TREE_COLUMN_subject, &subject, 
+		-1);
 	
 	// load_mail_raw_data(mail_db, uid, &data);
 	GtkTextView *textview = GTK_TEXT_VIEW(priv->textview);
@@ -322,11 +414,15 @@ int init_mail_list(struct shell_context *shell)
 	GtkTreeViewColumn *col = NULL;
 	
 	cr = gtk_cell_renderer_text_new();
-	col = gtk_tree_view_column_new_with_attributes("uid", cr, "text", 0, NULL);
+	col = gtk_tree_view_column_new_with_attributes("title", cr, "text", MAILS_TREE_COLUMN_subject, NULL);
 	gtk_tree_view_append_column(mail_list, col);
 	
 	cr = gtk_cell_renderer_text_new();
-	col = gtk_tree_view_column_new_with_attributes("subject", cr, "text", 1, NULL);
+	col = gtk_tree_view_column_new_with_attributes("uid", cr, "text", MAILS_TREE_COLUMN_uid, NULL);
+	gtk_tree_view_append_column(mail_list, col);
+	
+	cr = gtk_cell_renderer_text_new();
+	col = gtk_tree_view_column_new_with_attributes("timestamp", cr, "text", MAILS_TREE_COLUMN_timestamp, NULL);
 	gtk_tree_view_append_column(mail_list, col);
 
 	GtkTreeSelection *selection = gtk_tree_view_get_selection(mail_list);

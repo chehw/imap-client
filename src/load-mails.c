@@ -29,6 +29,8 @@
 #include <string.h>
 #include <assert.h>
 
+#include <limits.h>
+
 #include "imap_client.h"
 #include "mail_db.h"
 #include "utils.h"
@@ -194,6 +196,103 @@ label_err:
 	return -1;
 }
 
+static inline char *get_word(char *begin, char *p_end, char **p_next)
+{
+	assert(begin);
+	begin = trim_left(begin, p_end);
+	if(begin >= p_end) return NULL;
+	
+	char *p = begin;
+	if(*p == '"') {
+		p = ++begin;
+		while((p < p_end) && *p && *p != '"') {
+			if(*p == '\\') ++p; // skip next escaped char
+			++p;
+		}
+		if(p >= p_end) return NULL; // invalid format
+		*p++ = '\0';
+	}else {
+		p = strchr(p, ' ');
+		if(p) *p++ = '\0';
+	}
+	
+	if(p_next) *p_next = p;
+	return begin;
+	
+}
+
+int mail_utils_list(struct mail_utils *mail, const char *folder, const char *params, json_object **p_jlist)
+{
+	assert(mail && mail->imap);
+	struct imap_client_context *imap = mail->imap;
+	int rc = 0;
+	json_object *jresult = NULL;
+	json_object *jlist = NULL;
+	
+	char command[PATH_MAX] = "";
+	if(NULL == folder) folder = "/";
+	if(NULL == params) params = "*";
+	
+	snprintf(command, sizeof(command) - 1, "LIST %s", folder);
+	rc = imap->send_command(imap, command, params, &jresult);
+	if(rc) goto label_err;
+	
+	const char *status = json_get_value(jresult, string, status);
+	if(NULL == status || strcasecmp(status, "OK") != 0) goto label_err;
+	
+	json_object *jmessages = NULL;
+	json_bool ok = json_object_object_get_ex(jresult, "messages",  &jmessages);
+	if(!ok || NULL == jmessages) goto label_err;
+	
+	jlist = json_object_new_array();
+	assert(jlist);
+	
+	int num_messages = json_object_array_length(jmessages);
+	for(int i = 0; i < num_messages; ++i) {
+		json_object *jmessage = json_object_array_get_idx(jmessages, i);
+		if(NULL == jmessage) continue;
+		const char *message = json_object_get_string(jmessage);
+		if(NULL == message) continue;
+		
+		static const char prefix_pattern[] = "* LIST ";
+		static size_t prefix_size = sizeof(prefix_pattern) - 1;
+		if(strncasecmp(message, prefix_pattern, prefix_size) != 0) continue;
+		
+		char line[PATH_MAX] = "";
+		strncpy(line, message + prefix_size, sizeof(line) - 1);
+		
+		char *p_end = line + strlen(line);
+		char *p = trim_right(trim_left(line, p_end), p_end);
+		if(*p == '(') { // has flags
+			p = strchr(p, ')');
+			if(NULL == p) continue;
+			++p;
+			
+		}
+		char *p_next = NULL;
+		char *parent = get_word(p, p_end, &p_next);
+		if(NULL == parent) continue;
+		
+		char *child = NULL;
+		if(p_next) child = get_word(p_next, p_end, NULL);
+		
+		if(child && child[0]) {
+			json_object_array_add(jlist, json_object_new_string(child));
+		}
+	}
+	
+	if(p_jlist) *p_jlist = jlist;
+	else json_object_put(jlist);
+	
+	json_object_put(jresult);
+	return 0;
+	
+label_err:
+	if(jresult) json_object_put(jresult);
+	if(jlist) json_object_put(jlist);
+	return -1;
+}
+
 struct mail_utils *mail_utils_init(struct mail_utils *mail, struct imap_client_context *imap)
 {
 	assert(imap);
@@ -205,6 +304,7 @@ struct mail_utils *mail_utils_init(struct mail_utils *mail, struct imap_client_c
 	mail->imap = imap;
 	mail->query_uidlist = mail_utils_query_uidlist;
 	mail->fetch = mail_utils_fetch;
+	mail->list = mail_utils_list;
 	return mail;
 }
 
@@ -322,6 +422,15 @@ static int test_load_mails(struct app_context *app, struct imap_client_context *
 	struct mail_utils mail[1];
 	memset(mail, 0, sizeof(mail));
 	mail_utils_init(mail, imap);
+	
+	json_object *jlist = NULL;
+	rc = mail->list(mail, "/", NULL, &jlist);
+	assert(0 == rc && jlist);
+	fprintf(stderr, "LIST INBOX: \n%s\n", json_object_to_json_string_ext(jlist, JSON_OUTPUT_FORMAT));
+	json_object_put(jlist);
+	jlist = NULL;
+	
+	return 0;
 	
 	struct bdb_context *db = &mail_db->db_raw_data;
 	uint64_t latest_uid = 0;
