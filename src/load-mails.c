@@ -284,6 +284,7 @@ static int test_load_mails(struct app_context *app, struct imap_client_context *
 	}else {
 		fprintf(stderr, "iter_last_failed: %s\n", db_strerror(rc));
 	}
+	db->iter_close(db);
 	printf("==lastest_uid: %lu\n", (unsigned long)latest_uid);
 	
 	// query uid
@@ -300,6 +301,7 @@ static int test_load_mails(struct app_context *app, struct imap_client_context *
 			
 		}
 	}
+	free(uid_list);
 	return 0;
 }
 

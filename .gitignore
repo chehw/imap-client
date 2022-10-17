@@ -79,5 +79,5 @@ log
 !tools
 !tools/*.c
 !tools/*.h
-.gch
+*.gch
 

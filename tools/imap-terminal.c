@@ -34,6 +34,8 @@
 #include <vte/vte.h>
 #include <webkit2/webkit2.h>
 
+#include <gnutls/x509.h>
+
 /**
  * build:
  * gcc -std=gnu99 -g -Wall -o imap-terminal imap-terminal.c -lm -lpthread $(pkg-config --cflags --libs gtk+-3.0 vte-2.91 gnutls webkit2gtk-4.0) 
@@ -217,7 +219,6 @@ static void show_debug_message(struct shell_context *shell, const char *message,
 	return;
 }
 
-
 static void register_signals(struct shell_context *shell);
 static int init_windows(struct shell_context *shell)
 {
@@ -261,13 +262,13 @@ static int init_windows(struct shell_context *shell)
 	gtk_grid_attach(GTK_GRID(grid), sidebar, 0, 0, 1, 1);
 	gtk_grid_attach(GTK_GRID(grid), stack, 1, 0, 1, 1);
 	
-	scrolled_win = gtk_scrolled_window_new(NULL, NULL);
-	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_win), GTK_POLICY_NEVER, GTK_POLICY_ALWAYS);
-	gtk_widget_set_hexpand(scrolled_win, TRUE);
-	gtk_widget_set_size_request(scrolled_win, -1, 180);
-	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled_win), GTK_SHADOW_ETCHED_OUT);
 	vte = vte_terminal_new();
-	gtk_widget_set_vexpand(vte, TRUE);
+	gtk_widget_set_hexpand(vte, TRUE);
+	scrolled_win = gtk_scrolled_window_new(NULL, NULL);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_win), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled_win), GTK_SHADOW_ETCHED_IN);
+	gtk_widget_set_size_request(scrolled_win, -1, 200);
+	gtk_widget_set_vexpand(scrolled_win, TRUE);
 	gtk_container_add(GTK_CONTAINER(scrolled_win), vte);
 	gtk_stack_add_titled(GTK_STACK(stack), scrolled_win, "terminal", "Terminal");
 	
@@ -362,67 +363,122 @@ static int shell_init(struct shell_context *shell)
 }
 
 
+#define gnutls_check_error(ret_code) do { \
+		if(ret_code < 0) { \
+			fprintf(stderr, "%s(%d)::%s(): gnutls error: %s\n", \
+				__FILE__, __LINE__, __FUNCTION__, \
+				gnutls_strerror(ret_code)); \
+			exit(ret_code); \
+		} \
+	}while(0)
+	
+
 volatile int g_quit = 0;
 static pthread_t s_pty_th;
-static void *pty_thread(void *user_data)
+
+#include <sys/socket.h>
+#include <unistd.h>
+#include <netdb.h>
+int connect2(const char *server, const char *port, struct addrinfo *p_addr)
 {
-	VtePty *pty = user_data;
-	assert(pty);
+	struct addrinfo hint, *serv_info = NULL, *p = NULL;
+	memset(&hint, 0, sizeof(hint));
+	hint.ai_family = AF_INET;
+	hint.ai_socktype = SOCK_STREAM;
 	
-	int fd = vte_pty_get_fd(pty);
-	printf("vty.fd = %d\n", fd);
-	
-	
-	while(!g_quit)
-	{
-		sleep(1);
+	int rc = getaddrinfo(server, port, &hint, &serv_info);
+	if(rc) {
+		fprintf(stderr, "error: %s\n", gai_strerror(rc));
+		exit(1);
 	}
 	
+	int fd = -1;
+	for(p = serv_info; NULL != p; p = p->ai_next)
+	{
+		fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+		if(fd < 0) continue;
+		
+		printf("fd: %d\n", fd);
+		rc = connect(fd, p->ai_addr, p->ai_addrlen);
+		if(rc) {
+			perror("==> connect failed");
+			close(fd);
+			fd = -1;
+			continue;
+		}
+		break;
+	}
 	
-	pthread_exit(pty);
+	if(NULL == p) {
+		freeaddrinfo(serv_info);
+		return -1;
+	}
+	
+	char host[NI_MAXHOST] = "";
+	char service[NI_MAXSERV] = "";
+	rc = getnameinfo(p->ai_addr, p->ai_addrlen, 
+		host, sizeof(host), service, sizeof(service),
+		NI_NUMERICSERV);
+	if(0 == rc) {
+		fprintf(stderr, "[info]: connected to %s:%s\n", host, service);
+	}
+	
+	if(p_addr) {
+		*p_addr = *p;
+		struct sockaddr *addr = calloc(p->ai_addrlen, 1);
+		assert(addr);
+		p_addr->ai_addr = addr;
+	}
+	freeaddrinfo(serv_info);
+	return fd;
 }
 
-static void on_vte_commit(VteTerminal *vte, char *text, guint size, struct shell_context *shell)
+static inline char *parse_imap_url(const char *_url, 
+	char **p_protocol, char **p_server_name, char **p_port)
 {
-	GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(shell->logview));
-	GtkTextIter iter;
-	gtk_text_buffer_get_end_iter(buffer, &iter);
-	gtk_text_buffer_insert(buffer, &iter, text, size);
+	if(NULL == _url) return NULL;
 	
-	show_debug_message(shell, text, size);
-	return;
+	char *url = strdup(_url);
+	char *p = url;
+	char *p_end = url + strlen(url);
+	char *p_delim = strstr(url, "://");
+	if(p_delim) {
+		*p_delim = '\0';
+		*p_protocol = p;
+		p = p_delim + sizeof("://") - 1;
+	}
+	assert(p < p_end);
+	
+	*p_server_name = p;
+	p_delim = strchr(p, '/');
+	if(p_delim) *p_delim = '\0';
+
+	p_delim = strchr(p, ':');
+	if(p_delim) {
+		*p_delim++ = '\0';
+		*p_port = p_delim;
+	}
+	return url;
 }
+
+extern char **environ;
 static int shell_run(struct shell_context *shell)
 {
 	gtk_widget_show_all(shell->window);
 	
 	VteTerminal *vte = VTE_TERMINAL(shell->vte);
+	
+	char *argv[] = {
+		"tests/test_imap_client",
+		NULL,
+	};
+	vte_terminal_spawn_async(vte, VTE_PTY_DEFAULT, NULL, 
+		argv, environ, 
+		G_SPAWN_DEFAULT, 
+		NULL, NULL, NULL, 
+		2000,
+		NULL, NULL, NULL);
 
-	VtePty *pty = vte_terminal_get_pty(vte);
-	if(NULL == pty) {
-		GError *gerr = NULL;
-		pty = vte_terminal_pty_new_sync(vte, VTE_PTY_DEFAULT, NULL, &gerr);
-		if(gerr) {
-			fprintf(stderr, "error: %s\n", gerr->message);
-			return -1;
-		}
-		
-		vte_terminal_set_pty(vte, pty);
-		
-	}
-	pty = vte_terminal_get_pty(vte);
-	assert(pty);
-
-	vte_terminal_feed(vte, "test data 1\r\n", -1);
-	vte_terminal_feed(vte, "test data 2\r\n", -1);
-	
-	int rc = pthread_create(&s_pty_th, NULL, pty_thread, pty);
-	assert(0 == rc);
-	
-	g_signal_connect(shell->vte, "commit", G_CALLBACK(on_vte_commit), shell);
-	
-	
-	
 	gtk_main();
 	return 0;
 }
