@@ -93,6 +93,8 @@ struct imap_client_context
 struct imap_client_context * imap_client_context_init(struct imap_client_context *imap, void *user_data);
 void  imap_client_context_cleanup(struct imap_client_context *imap);
 
+int imap_client_set_credentials(struct imap_client_context *imap, const struct imap_credentials *cred);
+const struct imap_credentials *imap_client_get_credentials(struct imap_client_context *imap);
 #ifdef __cplusplus
 }
 #endif

@@ -29,59 +29,17 @@
 #include <string.h>
 #include <assert.h>
 
-#include <gtk/gtk.h>
 #include "imap_client.h"
 #include "mail_db.h"
 #include "utils.h"
 #include "app.h"
 
+#include <json-c/json.h>
 #include <endian.h>
 
-
-#if defined(TEST_LOAD_MAILS_) && defined(_STAND_ALONE)
-
-static struct app_context g_app[1];
-
-static int test_load_mails(struct app_context *app, struct imap_client_context *imap, struct mail_db_context *mail_db);
-int main(int argc, char **argv)
-{
-	gtk_init(&argc, &argv);
-	
-	int rc = 0;
-	struct app_context *app = app_context_init(g_app, argc, argv, NULL);
-	assert(app && app->priv);
-	
-	debug_printf("== work_dir: %s\n"
-		"== app_name: %s\n", 
-		app->work_dir, app->app_name);
-		
-	rc = app->init(app, NULL);
-	assert(0 == rc);
-	
-	struct imap_client_context * imap = app_get_imap_client(app);
-	struct mail_db_context *mail_db = app_get_mail_db(app);
-	assert(imap && mail_db);
-	
-	struct imap_credentials *cred = imap_credentials_load(NULL, NULL, NULL);
-	rc = imap->connect(imap, cred);
-	assert(0 == rc);
-	
-	rc = imap->query_capabilities(imap, NULL);
-	assert(0 == rc);
-	
-	rc = imap->authenticate(imap, NULL, NULL);
-	assert(0 == rc);
-	
-	rc = test_load_mails(app, imap, mail_db);
-	
-	imap_credentials_clear(cred);
-	free(cred);
-	app_context_cleanup(app);
-	return rc;
-}
+#include "mail_utils.h"
 
 #define JSON_OUTPUT_FORMAT (JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE)
-
 static ssize_t query_mail_exists(json_object *jmessages, ssize_t *p_uidnext, ssize_t *p_recent)
 {
 	ssize_t num_exists = 0;
@@ -133,12 +91,14 @@ static ssize_t query_mail_exists(json_object *jmessages, ssize_t *p_uidnext, ssi
 	return num_exists;
 }
 
-
-static ssize_t query_uid_list(struct imap_client_context *imap, const char *folder, uint64_t **p_uid_list)
+ssize_t mail_utils_query_uidlist(struct mail_utils *mail, const char *folder, ssize_t limits , uint64_t **p_uid_list)
 {
+	assert(mail && mail->imap);
+	struct imap_client_context *imap = mail->imap;
+	
 	json_object *jresult = NULL;
 	json_object *jmessages = NULL;
-	json_bool ok = FALSE;
+	json_bool ok = false;
 	ssize_t num_uids = 0;
 	if(NULL == folder) folder = "INBOX";
 	int rc = imap->send_command(imap, "EXAMINE", folder, &jresult);
@@ -163,7 +123,7 @@ static ssize_t query_uid_list(struct imap_client_context *imap, const char *fold
 	
 	
 	// query latest mails
-	const ssize_t limits = 1;
+	if(limits <= 0) limits = 100;	// default: get latest 100 mails
 	ssize_t start_index = num_exists - limits + 1;
 	if(start_index < 1) start_index = 1;
 	
@@ -213,13 +173,95 @@ label_err:
 	return -1;
 }
 
-static int load_rawdata(struct bdb_context *db_raw_data, struct imap_client_context *imap, int64_t uid)
+int mail_utils_fetch(struct mail_utils *mail, int64_t uid, const char *params, json_object **p_jresult)
 {
+	assert(mail && mail->imap);
+	struct imap_client_context *imap = mail->imap;
+	
+	int rc = 0;
+	json_object *jresult = NULL;
+	char command[100] = "";
+	snprintf(command, sizeof(command) - 1, "UID FETCH %lu", (unsigned long)uid);
+	if(NULL == params) params = "RFC822";
+	rc = imap->send_command(imap, command, params, &jresult);
+	if(rc) goto label_err;
+	
+	*p_jresult = jresult;
+	return 0;
+
+label_err:
+	if(jresult) json_object_put(jresult);
+	return -1;
+}
+
+struct mail_utils *mail_utils_init(struct mail_utils *mail, struct imap_client_context *imap)
+{
+	assert(imap);
+	
+	if(NULL == mail) mail = calloc(1, sizeof(*mail));
+	else memset(mail, 0, sizeof(*mail));
+	assert(mail);
+	
+	mail->imap = imap;
+	mail->query_uidlist = mail_utils_query_uidlist;
+	mail->fetch = mail_utils_fetch;
+	return mail;
+}
+
+void mail_utils_cleanup(struct mail_utils *mail)
+{
+	return;
+}
+
+#if defined(TEST_LOAD_MAILS_) && defined(_STAND_ALONE)
+#include <gtk/gtk.h>
+static struct app_context g_app[1];
+
+static int test_load_mails(struct app_context *app, struct imap_client_context *imap, struct mail_db_context *mail_db);
+int main(int argc, char **argv)
+{
+	gtk_init(&argc, &argv);
+	
+	int rc = 0;
+	struct app_context *app = app_context_init(g_app, argc, argv, NULL);
+	assert(app && app->priv);
+	
+	debug_printf("== work_dir: %s\n"
+		"== app_name: %s\n", 
+		app->work_dir, app->app_name);
+		
+	rc = app->init(app, NULL);
+	assert(0 == rc);
+	
+	struct imap_client_context * imap = app_get_imap_client(app);
+	struct mail_db_context *mail_db = app_get_mail_db(app);
+	assert(imap && mail_db);
+	
+	struct imap_credentials *cred = imap_credentials_load(NULL, NULL, NULL);
+	rc = imap->connect(imap, cred);
+	assert(0 == rc);
+	
+	rc = imap->query_capabilities(imap, NULL);
+	assert(0 == rc);
+	
+	rc = imap->authenticate(imap, NULL, NULL);
+	assert(0 == rc);
+	
+	rc = test_load_mails(app, imap, mail_db);
+	
+	imap_credentials_clear(cred);
+	free(cred);
+	app_context_cleanup(app);
+	return rc;
+}
+
+static int load_rawdata(struct mail_utils *mail, struct bdb_context *db_raw_data, int64_t uid)
+{
+	assert(mail && mail->imap);
 	int rc = 0;
 	json_object *jresult = NULL;
 	
 	debug_printf("%s(): uid = %ld", __FUNCTION__, (long)uid);
-	
 	// check uid in db
 	DB *dbp = db_raw_data->dbp;
 	DBT key, value;
@@ -243,10 +285,13 @@ static int load_rawdata(struct bdb_context *db_raw_data, struct imap_client_cont
 		goto label_err;
 	}
 	
-	char command[100] = "";
-	snprintf(command, sizeof(command) - 1, "UID FETCH %lu", (unsigned long)uid);
-	rc = imap->send_command(imap, command, "RFC822", &jresult);
+	rc = mail->fetch(mail, uid, "RFC822", &jresult);
 	if(rc) goto label_err;
+	
+	//~ char command[100] = "";
+	//~ snprintf(command, sizeof(command) - 1, "UID FETCH %lu", (unsigned long)uid);
+	//~ rc = imap->send_command(imap, command, "RFC822", &jresult);
+	//~ if(rc) goto label_err;
 
 	const char *raw_data = json_object_to_json_string_ext(jresult, JSON_OUTPUT_FORMAT);
 	if(NULL == raw_data) goto label_err;
@@ -273,6 +318,11 @@ label_err:
 static int test_load_mails(struct app_context *app, struct imap_client_context *imap, struct mail_db_context *mail_db)
 {
 	int rc = 0;
+	
+	struct mail_utils mail[1];
+	memset(mail, 0, sizeof(mail));
+	mail_utils_init(mail, imap);
+	
 	struct bdb_context *db = &mail_db->db_raw_data;
 	uint64_t latest_uid = 0;
 	rc = db->iter_last(db);
@@ -289,7 +339,7 @@ static int test_load_mails(struct app_context *app, struct imap_client_context *
 	
 	// query uid
 	uint64_t *uid_list = NULL;
-	ssize_t num_uids = query_uid_list(imap, "INBOX", &uid_list);
+	ssize_t num_uids = mail_utils_query_uidlist(mail, "INBOX", 1, &uid_list);
 	if(num_uids > 0) {
 		assert(uid_list);
 		for(ssize_t i = 0;i < num_uids; ++i) {
@@ -297,8 +347,7 @@ static int test_load_mails(struct app_context *app, struct imap_client_context *
 				printf("uid: %ld already exists.\n", (long)uid_list[i]);
 				continue;
 			}
-			load_rawdata(&mail_db->db_raw_data, imap, uid_list[i]);
-			
+			load_rawdata(mail, &mail_db->db_raw_data, uid_list[i]);
 		}
 	}
 	free(uid_list);

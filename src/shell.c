@@ -37,6 +37,8 @@
 #include "shell_private.h"
 
 #include "mail_db.h"
+#include "imap_client.h"
+#include "mail_utils.h"
 
 static int shell_init(struct shell_context *shell, json_object *jconfig);
 static int shell_run(struct shell_context *shell);
@@ -76,7 +78,42 @@ static void on_show_inspector(GtkWidget *button, WebKitWebView *webview)
 	if(NULL == webview) return;
 	WebKitWebInspector *inspector = webkit_web_view_get_inspector(webview);
 	if(inspector) webkit_web_inspector_show(inspector);
+}
+
+static void shell_ui_reset(struct shell_context *shell)
+{
+	return;
+}
+static void shell_load_mails(struct shell_context *shell, struct imap_client_context *imap)
+{
+	return;
+}
+
+static void on_connect_imap_server(GtkWidget *button, struct shell_context *shell)
+{
+	assert(shell && shell->app && shell->priv);
+	struct shell_private *priv = shell->priv;
+	struct imap_client_context *imap = priv->mail->imap;
+	assert(imap);
+	const struct imap_credentials *cred = imap_client_get_credentials(imap);
+	assert(cred);
 	
+	int rc = 0;
+	priv->is_connected = !priv->is_connected;
+	
+	if(!priv->is_connected) {
+		imap->disconnect(imap);
+		shell_ui_reset(shell);
+		
+		return;
+	}else {
+		rc = imap->connect(imap, cred);
+		if(0 == rc) {
+			priv->is_connected = 1;
+			shell_load_mails(shell, imap);
+		}
+	}
+	return;
 }
 
 static int init_windows(struct shell_context *shell)
@@ -142,17 +179,34 @@ static int init_windows(struct shell_context *shell)
 	priv->textview = textview;
 	priv->webview = webview;
 	
-
-	g_signal_connect_swapped(priv->window, "destroy", G_CALLBACK(shell->stop), shell);
+	// imap ui
+	GtkWidget *btn_connect = gtk_button_new_with_label("connect");
+	g_signal_connect(btn_connect, "clicked", G_CALLBACK(on_connect_imap_server), shell);
+	GtkWidget *url_entry = gtk_entry_new();
+	priv->btn_connect = btn_connect;
+	priv->url_entry = url_entry;
+	gtk_header_bar_pack_start(GTK_HEADER_BAR(header_bar), btn_connect);
+	gtk_header_bar_pack_start(GTK_HEADER_BAR(header_bar), url_entry);
 	
+	g_signal_connect_swapped(priv->window, "destroy", G_CALLBACK(shell->stop), shell);
 	return 0;
 }
 
+int init_mail_list(struct shell_context *shell);
 static int shell_init(struct shell_context *shell, json_object *jconfig)
 {
-	init_windows(shell);
+	assert(shell && shell->app && shell->priv);
+	struct shell_private *priv = shell->priv;
+	struct imap_client_context *imap = app_get_imap_client(shell->app);
+	assert(imap);
+	const struct imap_credentials *cred = imap_client_get_credentials(imap);
+	assert(cred);
 	
-	int init_mail_list(struct shell_context *shell);
+	mail_utils_init(shell->priv->mail, imap);
+	
+	init_windows(shell);
+	gtk_entry_set_text(GTK_ENTRY(priv->url_entry), cred->server);
+	
 	init_mail_list(shell);
 	return 0;
 }

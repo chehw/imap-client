@@ -225,6 +225,20 @@ struct imap_private
 	struct imap_buffer buffer[1];
 };
 
+int imap_client_set_credentials(struct imap_client_context *imap, const struct imap_credentials *cred)
+{
+	assert(imap && imap->priv);
+	if(cred == imap->priv->credentials) return 0;
+	cred = imap_credentials_copy(imap->priv->credentials, cred);
+	assert(cred);
+	return 0;
+}
+const struct imap_credentials *imap_client_get_credentials(struct imap_client_context *imap)
+{
+	if(imap && imap->priv) return imap->priv->credentials;
+	return NULL;
+}
+
 static void imap_private_free(struct imap_private *priv)
 {
 	debug_printf("%s(%p)...\n", __FUNCTION__, priv);
@@ -398,21 +412,16 @@ static int imap_client_connect2(struct imap_private *priv, const struct imap_cre
 	if(NULL == port) port = use_tls?"993":"143"; 
 	
 	assert(use_tls == 1); 	// force use tls
-	pthread_mutex_lock(&priv->mutex);
-	
 	int socket_fd = tcp_connect2(server, port, 1, NULL);
 	if(socket_fd == -1) {
 		priv->connection_status = -1;
-		pthread_mutex_unlock(&priv->mutex);
 		return -1;
 	}
 	
 	priv->socket_fd = socket_fd;
 	priv->connection_status = 1;	// connected, trying to handshake
-	pthread_mutex_unlock(&priv->mutex);
 	
 	debug_printf("socket_fd: %d\n", socket_fd);
-	
 	gnutls_session_t session = priv->session;
 
 	// tls handshake
@@ -501,15 +510,16 @@ static int imap_connect(struct imap_client_context *imap, const struct imap_cred
 		return 1; // already connected
 	}
 	
+	if(NULL == credentials) credentials = priv->credentials;
+	if(credentials != priv->credentials) {
+		imap_credentials_copy(priv->credentials, credentials);
+	}
 	
-	imap_credentials_copy(priv->credentials, credentials);
+	rc = imap_client_connect2(priv, credentials);
+	priv->connection_status = (0 == rc);
 	pthread_mutex_unlock(&priv->mutex);
 	
-	
-	//rc = pthread_create(&priv->th, NULL, imap_client_thread, imap);
-	rc = imap_client_connect2(priv, credentials);
 	assert(0 == rc);
-
 	return rc;
 }
 

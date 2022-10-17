@@ -34,13 +34,16 @@
 #include "utils.h"
 
 #include <locale.h>
+#include <gnutls/gnutls.h>
 
 
 static struct app_context g_app[1];
 int main(int argc, char **argv)
 {
-	setlocale(LC_ALL, "");
+//	setlocale(LC_ALL, "");
 	gtk_init(&argc, &argv);
+	
+	gnutls_global_init();
 	
 	int rc = 0;
 	struct app_context *app = app_context_init(g_app, argc, argv, NULL);
@@ -49,13 +52,14 @@ int main(int argc, char **argv)
 	debug_printf("== work_dir: %s\n"
 		"== app_name: %s\n", 
 		app->work_dir, app->app_name);
-		
+	
 	rc = app->init(app, NULL);
 	assert(0 == rc);
 	
 	rc = app->run(app);
-	
+
 	app_context_cleanup(app);
+	gnutls_global_deinit();
 	return rc;
 }
 

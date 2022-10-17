@@ -81,9 +81,9 @@ struct app_private * app_private_new(struct app_context *app)
 	ssize_t cb = readlink("/proc/self/exe", priv->app_path, sizeof(priv->app_path));
 	assert(cb > 0);
 	priv->app_name = basename(priv->app_path);
-	char *work_dir = dirname(priv->app_path);
-	assert(priv->app_name && work_dir);
-	strncpy(priv->work_dir, work_dir, sizeof(priv->work_dir));
+	(void)dirname(priv->app_path);
+	char *work_dir = getcwd(priv->work_dir, sizeof(priv->work_dir));
+	assert(work_dir);
 	
 	app->priv = priv;
 	app->app_name = priv->app_name;
@@ -206,6 +206,7 @@ static int app_init(struct app_context *app, const char *conf_file)
 {
 	int rc = 0;
 	assert(app && app->priv);
+
 	struct app_private *priv = app->priv;
 	json_object *jconfig = NULL;
 	if(conf_file) {
@@ -221,12 +222,13 @@ static int app_init(struct app_context *app, const char *conf_file)
 	assert(mail_db);
 	priv->mail_db = mail_db;
 	
-	
-	
-	
 	struct imap_client_context *imap = imap_client_context_init(NULL, app);
 	assert(imap);
 	priv->imap = imap;
+	const char *credentials_file = NULL;
+	if(jconfig) credentials_file = json_get_value(jconfig, string, credentials_file);
+	struct imap_credentials *cred = imap_credentials_load(NULL, credentials_file, NULL);
+	imap_client_set_credentials(imap, cred);
 	
 	struct shell_context *shell = shell_context_init(NULL, app);
 	assert(shell);

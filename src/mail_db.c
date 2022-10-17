@@ -75,7 +75,8 @@ static int open_databases(struct mail_db_context *mail_db)
 	static const char *db_filenames[] = {
 		"raw_data.db", 
 		"mails-rfc822.db",
-		NULL
+		NULL,
+		NULL,
 	};
 	struct bdb_context *db = NULL;
 	size_t num_dbs = sizeof(mail_db->dbs) / sizeof(mail_db->dbs[0]);
