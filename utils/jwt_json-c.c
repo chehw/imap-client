@@ -281,6 +281,36 @@ static ssize_t jwt_serialize(struct jwt_json_c *jwt, char **p_output)
 	return cb_msg;
 }
 
+static int jwt_claims_add_iss(struct jwt_json_c *jwt, const char *issuer)
+{
+	assert(jwt && jwt->jobject);
+	if(NULL == issuer) return -1;
+	return jwt->claims_add(jwt, "iss", json_object_new_string(issuer));
+}
+//~ static int jwt_claims_add_sub(struct jwt_json_c *jwt, const char *subject);
+static int jwt_claims_add_aud(struct jwt_json_c *jwt, const char *audience)
+{
+	return jwt->claims_add(jwt, "aud", json_object_new_string(audience));
+}
+static int jwt_claims_add_exp(struct jwt_json_c *jwt, int64_t expiration)
+{
+	assert(jwt && jwt->jobject);
+	return jwt->claims_add(jwt, "exp", json_object_new_int64(expiration));
+}
+//~ static int jwt_claims_add_nbf(struct jwt_json_c *jwt, int64_t not_before);
+static int jwt_claims_add_iat(struct jwt_json_c *jwt, int64_t issued_at)
+{
+	assert(jwt && jwt->jobject);
+	if(issued_at <= 0) issued_at = time(NULL);
+	return jwt->claims_add(jwt, "iat", json_object_new_int64(issued_at));
+}
+static int jwt_claims_add_jti(struct jwt_json_c *jwt, const char *jwt_id)
+{
+	assert(jwt && jwt->jobject);
+	if(NULL == jwt_id) return -1;
+	return jwt->claims_add(jwt, "jti", json_object_new_string(jwt_id));
+}
+
 struct jwt_json_c * jwt_json_c_init(struct jwt_json_c *jwt, void *user_data)
 {
 	if(NULL == jwt) jwt = calloc(1, sizeof(*jwt));
@@ -301,7 +331,23 @@ struct jwt_json_c * jwt_json_c_init(struct jwt_json_c *jwt, void *user_data)
 	jwt->claims_remove = jwt_claims_remove;
 	jwt->serialize = jwt_serialize;
 	
+	
+	jwt->claims_add_iss = jwt_claims_add_iss;
+	jwt->claims_add_aud = jwt_claims_add_aud;
+	jwt->claims_add_exp = jwt_claims_add_exp;
+	jwt->claims_add_iat = jwt_claims_add_iat;
+	jwt->claims_add_jti = jwt_claims_add_jti;
 	return jwt;
+}
+void jwt_json_c_reset(struct jwt_json_c *jwt)
+{
+	if(NULL == jwt) return;
+	if(jwt->jobject) {
+		json_object_put(jwt->jobject);
+		jwt->jobject = NULL;
+	}
+	jwt->jobject = json_object_new_object();
+	return;
 }
 void jwt_json_c_cleanup(struct jwt_json_c *jwt)
 {
@@ -316,7 +362,7 @@ void jwt_json_c_cleanup(struct jwt_json_c *jwt)
 			priv->key_size = 0;
 		}
 		priv->alg = jwt_algorithm_none;
-		free(jwt->priv);
+		free(priv);
 		jwt->priv = NULL;
 	}
 	if(jwt->jobject) {
@@ -327,7 +373,30 @@ void jwt_json_c_cleanup(struct jwt_json_c *jwt)
 }
 
 #if defined(TEST_JWT_JSON_C_) && defined(_STAND_ALONE)
+#include <stdarg.h>
+#include <curl/curl.h>
+
+#define TEST(func, ...) do { \
+		fprintf(stderr, "\e[33m==== %s() ====\e[39m\n", #func); \
+		int rc = func( __VA_ARGS__ ); \
+		fprintf(stderr, "%s==> rc = %d\e[39m\n================\n\n", rc?"\e[31m":"\e[32m", rc); \
+		assert(0 == rc); \
+	} while(0)
+
+static int test_jwt_generate();
+static int test_oauth2(int argc, char **argv);
+
 int main(int argc, char **argv)
+{
+	int rc = 0;
+	TEST(test_jwt_generate, argc, argv);
+	
+	rc = test_oauth2(argc, argv);
+	
+	return rc;
+}
+
+static int test_jwt_generate(int argc, char **argv)
 {
 	int rc = 0;
 	struct jwt_json_c *jwt = jwt_json_c_init(NULL, NULL);
@@ -371,7 +440,82 @@ int main(int argc, char **argv)
 	
 	jwt_json_c_cleanup(jwt);
 	free(jwt);
-	
 	return rc;
+}
+static int test_oauth2(int argc, char **argv)
+{
+	curl_global_init(CURL_GLOBAL_ALL);
+	
+	int rc = 0;
+	struct jwt_json_c *jwt = jwt_json_c_init(NULL, NULL);
+	assert(jwt);
+	
+	const char *credentials_file = ".private/credentials.json";
+	if(argc > 1) credentials_file = argv[1];
+	json_object *jcredentials = json_object_from_file(credentials_file);
+	assert(jcredentials);
+	
+	json_object *jprivkey = NULL;
+	json_bool ok = json_object_object_get_ex(jcredentials, "private_key", &jprivkey);
+	assert(ok && jprivkey);
+	const char *privkey = json_object_get_string(jprivkey);
+	int cb_key = strlen(privkey);
+	rc = jwt->set_alg(jwt, jwt_algorithm_rs256);
+	rc = jwt->set_privkey(jwt, (const unsigned char*)privkey, cb_key, 0);
+	assert(0 == rc);
+	
+	const char *client_email = json_get_value(jcredentials, string, client_email);
+	const char *token_uri = json_get_value(jcredentials, string, token_uri);
+	assert(client_email);
+	assert(token_uri);
+	
+	int64_t issued_at = time(NULL);
+	rc = jwt->claims_add_iss(jwt, client_email);
+	rc = jwt->claims_add_aud(jwt, token_uri);
+	rc = jwt->claims_add_iat(jwt, issued_at);
+	rc = jwt->claims_add_exp(jwt, issued_at + 3600);
+	
+	static const char *scopes = "https://www.googleapis.com/auth/cloud-platform";
+	rc = jwt->claims_add(jwt, "scope", json_object_new_string(scopes));
+	
+	char *jwt_string = NULL;
+	ssize_t cb_output = jwt->serialize(jwt, &jwt_string);
+	
+	printf("output(cb=%ld): %s\n", (long)cb_output, jwt_string);	
+	static char grant_type_encoded[] = "urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer";
+	
+	char post_fields[4096] = "";
+	long cb_fields = snprintf(post_fields, sizeof(post_fields), 
+		"grant_type=%s&assertion=%s",
+		grant_type_encoded, 
+		jwt_string);
+	
+	CURL *curl = curl_easy_init();
+	assert(curl);
+	curl_easy_setopt(curl, CURLOPT_URL, token_uri);
+	curl_easy_setopt(curl, CURLOPT_POST, 1L);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_fields);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)cb_fields);
+	//~ curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+	
+	CURLcode ret = curl_easy_perform(curl);
+	if(ret) {
+		fprintf(stderr, "ret: %d, err_msg: %s\n", ret, curl_easy_strerror(ret));
+	}
+	
+	curl_easy_cleanup(curl);
+	curl = NULL;
+	
+	free(jwt_string);
+	jwt_string = NULL;
+	
+	json_object_put(jcredentials);
+	jcredentials = NULL;
+	
+	jwt_json_c_cleanup(jwt);
+	free(jwt);
+	
+	curl_global_cleanup();
+	return 0;
 }
 #endif

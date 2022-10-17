@@ -74,8 +74,19 @@ case "$target" in
 			-I ../utils \
 			-o test_jwt_json-c \
 			../utils/jwt_json-c.c ../utils/base64.c \
-			-lm -lpthread -lgnutls -ljson-c 
+			-lm -lpthread -lgnutls -ljson-c -lcurl
 		;;
+		
+	gcloud-utils)
+		gcc -std=gnu99 -g -Wall -D_DEBUG \
+			-DTEST_GCLOUD_UTILS_ -D_STAND_ALONE \
+			-I ../utils \
+			-o test_gcloud-utils \
+			../utils/gcloud-utils.c \
+			../utils/jwt_json-c.c ../utils/base64.c \
+			-lm -lpthread -lgnutls -ljson-c -lcurl
+		;;
+		
 	*)
 		echo "build nothing."
 		exit 1

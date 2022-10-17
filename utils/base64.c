@@ -377,7 +377,7 @@ ssize_t base64url_decode(const char *b64url, size_t length, unsigned char **p_da
 
 #define TEST(func, ...) do { \
 		fprintf(stderr, "\e[33m==== %s() ====\e[39m\n", #func); \
-		int rc = func(##__VA_ARGS__); \
+		int rc = func( __VA_ARGS__ ); \
 		fprintf(stderr, "%s==> rc = %d\e[39m\n================\n\n", rc?"\e[31m":"\e[32m", rc); \
 		assert(0 == rc); \
 	} while(0)

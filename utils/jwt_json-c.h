@@ -42,9 +42,21 @@ struct jwt_json_c
 	
 	int (*claims_add)(struct jwt_json_c *jwt, const char *key, json_object *jvalue);
 	int (*claims_remove)(struct jwt_json_c *jwt, const char *key);
+	
+	
+	// rfc7519::Registered Claim Names
+	int (*claims_add_iss)(struct jwt_json_c *jwt, const char *issuer);
+	//~ int (*claims_add_sub)(struct jwt_json_c *jwt, const char *subject);
+	int (*claims_add_aud)(struct jwt_json_c *jwt, const char *audience);
+	int (*claims_add_exp)(struct jwt_json_c *jwt, int64_t expiration);
+	//~ int (*claims_add_nbf)(struct jwt_json_c *jwt, int64_t not_before);
+	int (*claims_add_iat)(struct jwt_json_c *jwt, int64_t issued_at);
+	int (*claims_add_jti)(struct jwt_json_c *jwt, const char *jwt_id);
+	
 	ssize_t (*serialize)(struct jwt_json_c *jwt, char **p_output);
 };
 struct jwt_json_c * jwt_json_c_init(struct jwt_json_c *jwt, void *user_data);
+void jwt_json_c_reset(struct jwt_json_c *jwt);
 void jwt_json_c_cleanup(struct jwt_json_c *jwt);
 
 

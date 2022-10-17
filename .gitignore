@@ -80,4 +80,5 @@ log
 !tools/*.c
 !tools/*.h
 *.gch
+.private
 
