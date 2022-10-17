@@ -59,7 +59,23 @@ case "$target" in
 			-lm -lpthread -ljson-c -ldb \
 			$(pkg-config --cflags --libs gnutls gtk+-3.0 webkit2gtk-4.0)
 		;;
-		
+	
+	base64)
+		gcc -std=gnu99 -g -Wall -D_DEBUG \
+			-DTEST_BASE64_ -D_STAND_ALONE \
+			-I ../utils \
+			-o test_base64 \
+			../utils/base64.c \
+			-lm -lpthread 
+		;;
+	jwt_json-c)
+		gcc -std=gnu99 -g -Wall -D_DEBUG \
+			-DTEST_JWT_JSON_C_ -D_STAND_ALONE \
+			-I ../utils \
+			-o test_jwt_json-c \
+			../utils/jwt_json-c.c ../utils/base64.c \
+			-lm -lpthread -lgnutls -ljson-c 
+		;;
 	*)
 		echo "build nothing."
 		exit 1
