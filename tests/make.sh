@@ -87,6 +87,15 @@ case "$target" in
 			-lm -lpthread -lgnutls -ljson-c -lcurl
 		;;
 		
+	regex-utils)
+		gcc -std=gnu99 -g -Wall -D_DEBUG \
+			-DTEST_REGEX_UTILS_ -D_STAND_ALONE \
+			-I ../utils \
+			-o test_regex-utils \
+			../utils/regex-utils.c \
+			-lm -lpthread -lpcre2-8
+		;;
+		
 	*)
 		echo "build nothing."
 		exit 1
