@@ -76,7 +76,7 @@ int imap_buffer_push_data(struct imap_buffer *buffer, char *data, size_t length)
 	int rc = imap_buffer_resize(buffer, buffer->start_pos + buffer->length + length + 1);
 	if(rc) return -1;
 	
-	char *dst = buffer->data + buffer->start_pos;
+	char *dst = buffer->data + buffer->start_pos + buffer->length;
 	memcpy(dst, data, length);
 	dst[length] = '\0';
 	buffer->length += length;
@@ -176,7 +176,7 @@ int imap_buffer_to_lines_array(struct imap_buffer *buf, struct lines_array *arra
 	const char *p_end = data + length;
 	char *p_nextline = NULL;
 	
-	fprintf(stderr, "buffer(cb=%ld): ", (long)buf->length);
+	debug_printf("%s(): buffer(cb=%ld): ", __FUNCTION__, (long)buf->length);
 	dump_printable((char *)buf->data, buf->length, 1);
 	
 	int rc = 1;
@@ -201,11 +201,14 @@ int imap_buffer_to_lines_array(struct imap_buffer *buf, struct lines_array *arra
 		}
 	}
 	
-	if(rc >= 0) {
+	if(rc >= 0 && p > buf->data) {
 		assert(p <= p_end);
 		size_t bytes_left = p_end - p;
-		if(bytes_left) memmove(buf->data, p, bytes_left);
-		
+		if(bytes_left) {
+			fprintf(stderr, "\e[31m[INFO]: memmove(): bytes=%ld, str=%s\e[39m\n",
+				(long)bytes_left, p);
+			memmove(buf->data, p, bytes_left);
+		}
 		buf->length = bytes_left;
 		buf->data[buf->length] = '\0';
 		

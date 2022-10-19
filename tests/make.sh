@@ -35,6 +35,7 @@ case "$target" in
 			../src/imap_client.c ../src/imap_buffer.c ../src/app.c \
 			../src/mail_db.c ../src/shell.c ../src/bdb_context.c \
 			../utils/utils.c ../utils/crypto.c \
+			../src/load-mails.c \
 			-lm -lpthread -ljson-c -ldb \
 			$(pkg-config --cflags --libs gnutls gtk+-3.0 webkit2gtk-4.0)
 		;;
@@ -94,6 +95,17 @@ case "$target" in
 			-o test_regex-utils \
 			../utils/regex-utils.c \
 			-lm -lpthread -lpcre2-8
+		;;
+		
+	test_fetch_mail)
+		gcc -std=gnu99 -g -Wall -D_DEBUG \
+			-DTEST_REGEX_UTILS_ -D_STAND_ALONE \
+			-I../utils -I ../include -I../src\
+			-o test_fetch_mail-utils \
+			../tests/test_fetch_mail.c \
+			../src/imap_client.c ../src/imap_buffer.c \
+			../utils/utils.c ../utils/crypto.c \
+			-lm -lpthread -lpcre2-8 -ljson-c -lgnutls
 		;;
 		
 	*)

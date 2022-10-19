@@ -426,6 +426,8 @@ int lines_array_resize(struct lines_array *array, size_t new_size)
 char *lines_array_add(struct lines_array *array, const char *line, size_t cb_line)
 {
 	if(NULL == line) return NULL;
+	debug_printf("%s(): (cb=%ld): ", __FUNCTION__, (long)cb_line);
+	dump_printable(line, cb_line, 1);
 	
 	int rc = lines_array_resize(array, array->length + 1);
 	assert(0 == rc);

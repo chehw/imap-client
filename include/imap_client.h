@@ -7,7 +7,7 @@ extern "C" {
 
 #include <stdint.h>
 #include <json-c/json.h>
-#include "utils.h"
+
 
 struct imap_buffer
 {
@@ -27,6 +27,7 @@ void imap_buffer_clear(struct imap_buffer *buffer);
 		if((buffer->refs > 0) && (0 == --buffer->refs)) { imap_buffer_clear(buffer); free(buffer); }; \
 	} while(0)
 
+struct lines_array;
 int imap_buffer_to_lines_array(struct imap_buffer *buf, struct lines_array *array, const char *tag, size_t cb_tag);
 
 

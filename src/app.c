@@ -34,6 +34,7 @@
 #include <limits.h>
 #include <getopt.h>
 
+#include "utils.h"
 #include "app.h"
 #include "shell.h"
 #include "mail_db.h"
