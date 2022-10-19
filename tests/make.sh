@@ -45,8 +45,8 @@ case "$target" in
 			-I../include -I../src -I../utils \
 			-DTEST_TEXT_UTILS_ -D_STAND_ALONE \
 			-o test_text-utils ../src/text-utils.c \
-			../utils/regex-utils.c \
-			-lm -lpthread -lgnutls -lpcre2-8
+			../utils/regex-utils.c ../utils/base64.c \
+			-lm -lpthread -lpcre2-8
 		;;
 	
 	load-mails|mail_db|bdb_context)

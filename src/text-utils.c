@@ -35,6 +35,7 @@
 
 #include "text-utils.h"
 #include "regex-utils.h"
+#include "base64.h"
 
 /**
  * text_to_utf8()
@@ -120,7 +121,7 @@ static ssize_t quoted_printable_decode(const char *qp_text, ssize_t length, char
 	assert(qp_text && length > 0);
 	char *dst = *p_dst;
 	if(NULL == dst) {
-		dst = calloc(length * 3, 1);
+		dst = calloc(length + 1, 1);
 		assert(dst);
 		*p_dst = dst;
 	}
@@ -131,14 +132,11 @@ static ssize_t quoted_printable_decode(const char *qp_text, ssize_t length, char
 	
 	for(;p < p_end; ++cb_dst) {
 		if(*p == '=' && p < (p_end - 3)) {
-			++p;
-			int hi = hex_value(*p++);
-			int lo = hex_value(*p++);
+			int hi = hex_value(p[1]);
+			int lo = hex_value(p[2]);
 			if(hi == -1 || lo == -1) return -1;
-			//~ assert(hi >= 0 && hi < 16);
-			//~ assert(lo >= 0 && lo < 16);
-			
-			*dst = MAKE_BYTE(hi, lo);
+			*dst++ = MAKE_BYTE(hi, lo);
+			p += 3;
 			continue;
 		}
 		*dst++ = *p++;
@@ -184,21 +182,16 @@ ssize_t mime_text_decode2(struct mime_text *mtext, char **p_decoded)
 	if(type != 'Q' && type != 'B') return -1;
 	
 	if(type == 'Q') return quoted_printable_decode(mtext->text, mtext->length, p_decoded);
-	
-	gnutls_datum_t b64 = { .data = (unsigned char *)mtext->text, .size = mtext->length };
-	gnutls_datum_t b64_decoded = { NULL, };
-	int rc = gnutls_base64_decode2(&b64, &b64_decoded);
-	if(rc == -1) {
-		if(b64_decoded.data) gnutls_free(b64_decoded.data);
-		return -1;
-	}
-	*p_decoded = (char *)b64_decoded.data;
-	return b64_decoded.size;
+	return base64_decode(mtext->text, mtext->length, (unsigned char **)p_decoded);
 }
 
 int mime_text_parse(struct mime_text *mtext, const char *msg, ssize_t cb_msg)
 {
-	static const char *pattern = "=\\?(.*)\\?([Q,q,B,b]?)\\?(.*)\\?=$";
+	static const char *pattern = 
+		"^=\\?(.*)"        // 1
+		"\\?([QqBb])"      // 2
+		"\\?(.*)"          // 3
+		"\\?=$";
 	
 	if(NULL == msg) return -1;
 	if(cb_msg == -1) cb_msg = strlen(msg);
@@ -275,12 +268,14 @@ label_err:
 #if defined(TEST_TEXT_UTILS_) && defined(_STAND_ALONE)
 int main(int argc, char **argv)
 {
-#define NUM_HDRS (3)
-	const char *msg_headers[NUM_HDRS] = {
+	const char *msg_headers[] = {
 		"=?us-ascii?Q?=3Dietf-822@test.mail?=",
 		"=?UTF-8?B?V2luZG93c+OCteODvOODkDIwMTLjgYxFT1PjgIHjgYTjgYTmqZ8=?=",
-		"=?ISO-2022-JP?B?GyRCIVo/TTpgPlIycCFbQihGfCFBGyhCKDUwGyRCOlAbKEIv?="
+		"=?ISO-2022-JP?B?GyRCIVo/TTpgPlIycCFbQihGfCFBGyhCKDUwGyRCOlAbKEIv?=",
+		"aaabbb?=",
+		"=?utf8?b?V2luZG93c+OCteODvOODkDIwMTLjgYxFT1PjgIHjgYTjgYTmqZ8=?=",
 	};
+#define NUM_HDRS ( sizeof(msg_headers) / sizeof(msg_headers[0]) )
 	
 	int rc = 0;
 	struct mime_text mtext[1];
@@ -290,9 +285,12 @@ int main(int argc, char **argv)
 		const char *line = msg_headers[i];
 		ssize_t cb_line = strlen(line);
 		rc = mime_text_parse(mtext, line, cb_line);
-		assert(0 == rc);
+		if(rc) {
+			fprintf(stderr, "\e[31m" "%.3d: invalid format: '%s'" "\e[39m" "\n", i, line);
+			continue;
+		}
 		
-		printf("text(cb=%ld): (charset=%s)", (long)mtext->utf8, mtext->charset);
+		printf("%.3d: text(cb=%ld): (charset=%s)", i, (long)mtext->utf8, mtext->charset);
 		printf("%s\n", mtext->utf8);
 		mime_text_clear(mtext);
 	}
