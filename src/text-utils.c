@@ -36,6 +36,7 @@
 #include "text-utils.h"
 #include "regex-utils.h"
 #include "base64.h"
+#include "utils.h"
 
 /**
  * text_to_utf8()
@@ -248,7 +249,10 @@ int mime_text_parse(struct mime_text *mtext, const char *msg, ssize_t cb_msg)
 				decoded_text, cb_decoded, 
 				&mtext->utf8, &mtext->cb_utf8);
 			free(decoded_text);
-			if(bytes_left == -1) goto label_err;
+			if(bytes_left == -1) {
+				debug_printf("text_to_utf8() failed.");
+				goto label_err;
+			}
 		}
 	}
 	mtext->raw_data = raw_data;
@@ -272,8 +276,10 @@ int main(int argc, char **argv)
 		"=?us-ascii?Q?=3Dietf-822@test.mail?=",
 		"=?UTF-8?B?V2luZG93c+OCteODvOODkDIwMTLjgYxFT1PjgIHjgYTjgYTmqZ8=?=",
 		"=?ISO-2022-JP?B?GyRCIVo/TTpgPlIycCFbQihGfCFBGyhCKDUwGyRCOlAbKEIv?=",
-		"aaabbb?=",
+		"=?utf8?q?ccc?=",
+		"=?utf8?A?ccc?=", // NG: (invalid encode_type)
 		"=?utf8?b?V2luZG93c+OCteODvOODkDIwMTLjgYxFT1PjgIHjgYTjgYTmqZ8=?=",
+		"==?ISO-2022-JP?B?GyRCIVo/TTpgPlIycCFbQihGfCFBGyhCKDUwGyRCOlAbKEIv?=", // NG: invalid leading chars
 	};
 #define NUM_HDRS ( sizeof(msg_headers) / sizeof(msg_headers[0]) )
 	
@@ -290,8 +296,8 @@ int main(int argc, char **argv)
 			continue;
 		}
 		
-		printf("%.3d: text(cb=%ld): (charset=%s)", i, (long)mtext->utf8, mtext->charset);
-		printf("%s\n", mtext->utf8);
+		printf("\e[32m" "%.3d: text(cb=%ld): (charset=%s)", i, (long)mtext->utf8, mtext->charset);
+		printf("%s" "\e[39m" "\n", mtext->utf8);
 		mime_text_clear(mtext);
 	}
 	
