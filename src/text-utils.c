@@ -34,6 +34,7 @@
 #include <gnutls/gnutls.h>
 
 #include "text-utils.h"
+#include "regex-utils.h"
 
 /**
  * text_to_utf8()
@@ -90,13 +91,29 @@ ssize_t text_to_utf8(const char *charset, const char *text, size_t cb_text, char
 }
 
 
-static inline int hex_value(const char c) {
-	if(c >= '0' && c <= '9') return c - '0';
-	if(c >= 'A' && c <= 'F') return 10 + c - 'A';
-	if(c >= 'a' && c <= 'f') return 10 + c - 'a';
-	return -1;
-}
+static int s_hex_value[256] = {
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	 0, 1, 2, 3, 4, 5, 6, 7,  8, 9,-1,-1,-1,-1,-1,-1, 
+	
+	-1,10,11,12,13,14,15,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,10,11,12,13,14,15,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+	-1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1, 
+};
 
+#define hex_value(c) s_hex_value[(unsigned char)(c)]
 #define MAKE_BYTE(hi, lo) ( (((unsigned char)(hi)) << 4) | ((unsigned char)(lo)) )
 static ssize_t quoted_printable_decode(const char *qp_text, ssize_t length, char **p_dst)
 {
@@ -117,8 +134,9 @@ static ssize_t quoted_printable_decode(const char *qp_text, ssize_t length, char
 			++p;
 			int hi = hex_value(*p++);
 			int lo = hex_value(*p++);
-			assert(hi >= 0 && hi < 16);
-			assert(lo >= 0 && lo < 16);
+			if(hi == -1 || lo == -1) return -1;
+			//~ assert(hi >= 0 && hi < 16);
+			//~ assert(lo >= 0 && lo < 16);
 			
 			*dst = MAKE_BYTE(hi, lo);
 			continue;
@@ -142,33 +160,32 @@ struct mime_text
 	size_t cb_utf8;
 };
 ******************************************************************************/
-_Bool mime_text_is_utf8(const struct mime_text *mime)
+_Bool mime_text_is_utf8(const struct mime_text *mtext)
 {
-	if(NULL == mime || NULL == mime->charset) return false;
-	return (strcasecmp(mime->charset, "utf-8") == 0) || (strcasecmp(mime->charset, "utf8") == 0);
+	if(NULL == mtext || NULL == mtext->charset) return false;
+	return (strcasecmp(mtext->charset, "utf-8") == 0) || (strcasecmp(mtext->charset, "utf8") == 0);
 }
 
-void mime_text_clear(struct mime_text *mime)
+void mime_text_clear(struct mime_text *mtext)
 {
-	if(NULL == mime) return;
-	if(mime->raw_data) free(mime->raw_data);
-	if(mime->utf8) {
-		if(mime->encode_type == 'B') gnutls_free(mime->utf8);
-		else free(mime->utf8);
+	if(NULL == mtext) return;
+	if(mtext->raw_data) free(mtext->raw_data);
+	if(mtext->utf8) {
+		free(mtext->utf8);
 	}
-	memset(mime, 0, sizeof(*mime));
+	memset(mtext, 0, sizeof(*mtext));
 	return;
 }
 
-ssize_t mime_text_decode2(struct mime_text *mime, char **p_decoded)
+ssize_t mime_text_decode2(struct mime_text *mtext, char **p_decoded)
 {
-	char type = mime->encode_type;
+	char type = mtext->encode_type;
 	type &= ~0x20;
 	if(type != 'Q' && type != 'B') return -1;
 	
-	if(type == 'Q') return quoted_printable_decode(mime->text, mime->length, p_decoded);
+	if(type == 'Q') return quoted_printable_decode(mtext->text, mtext->length, p_decoded);
 	
-	gnutls_datum_t b64 = { .data = (unsigned char *)mime->text, .size = mime->length };
+	gnutls_datum_t b64 = { .data = (unsigned char *)mtext->text, .size = mtext->length };
 	gnutls_datum_t b64_decoded = { NULL, };
 	int rc = gnutls_base64_decode2(&b64, &b64_decoded);
 	if(rc == -1) {
@@ -179,79 +196,78 @@ ssize_t mime_text_decode2(struct mime_text *mime, char **p_decoded)
 	return b64_decoded.size;
 }
 
-int mime_text_parse(struct mime_text *mime, const char *msg, ssize_t cb_msg)
+int mime_text_parse(struct mime_text *mtext, const char *msg, ssize_t cb_msg)
 {
+	static const char *pattern = "=\\?(.*)\\?([Q,q,B,b]?)\\?(.*)\\?=$";
+	
 	if(NULL == msg) return -1;
 	if(cb_msg == -1) cb_msg = strlen(msg);
 	if(cb_msg < 4) return -1;
 	
-	const char *p = msg;
-	const char *p_end = p + cb_msg;
+	int rc = 0;
+	struct regex_matched *matched = NULL;
+	struct regex_context re_ctx[1] = {{ NULL }};
+	struct regex_context *ctx = regex_context_init(re_ctx, NULL);
+	assert(ctx);
+	rc = ctx->set_patterns(ctx, 1, &pattern);
+	if(rc) goto label_err;
 	
-	// trim_right
-	while((p < p_end) && (p_end[-1] == '\r' || p_end[-1] == '\n')) --p_end;
-	cb_msg = p_end - p;
-	if(cb_msg < 4) return -1;
-	
-	// check format
-	if(p[0] != '=' || p[1] != '?') return -1;
-	p += 2; 
-	
-	if(p_end[-1] != '=' || p_end[-2] != '?') return -1;
-	p_end -= 2;
-	
-	cb_msg = p_end - p;
-	assert(cb_msg > 0);
-	
-	// parse ...
 	char *raw_data = calloc(cb_msg + 1, 1);
 	assert(raw_data);
-	memcpy(raw_data, p, cb_msg);
-	raw_data[cb_msg] = '\0';
-	p_end = raw_data + cb_msg;
+	memcpy(raw_data, msg, cb_msg);
 	
-	char *token = NULL;
-	char *charset = strtok_r(raw_data, "?", &token);
-	char *encode_type = strtok_r(NULL, "?", &token);
-	char *text = token;
-	
-	if(NULL == charset || NULL == encode_type || NULL == text) {
-		free(raw_data);
-		return -1;
+	ssize_t num_matched = ctx->match(ctx, msg, cb_msg, NULL, &matched);
+	if(num_matched != 4) {
+		goto label_err;
 	}
+	int begin = -1, end = -1;
 	
-	if(*encode_type != 'Q' && *encode_type != 'B') {
-		free(raw_data);
-		return -1;
-	}
+	// charset := \1
+	begin= matched[1].begin; end = matched[1].end;
+	assert(begin != -1 && end != -1);
+	raw_data[end] = '\0';
+	mtext->charset = &raw_data[begin];
 	
-	mime->raw_data = raw_data;
-	mime->charset = charset;
-	mime->encode_type = *encode_type;
-	mime->text = text;
-	mime->length = p_end - text;
+	// encode_type := \2
+	begin= matched[2].begin; end = matched[2].end;
+	if((end - begin) != 1) goto label_err;
+	mtext->encode_type = raw_data[begin];
+	
+	// text := \3
+	begin= matched[3].begin; end = matched[3].end;
+	assert(begin != -1 && end != -1);
+	raw_data[end] = '\0';
+	mtext->text = &raw_data[begin];
+	mtext->length = end - begin;
 	
 	// decode text
-	if(mime->length > 0) {
+	if(mtext->length > 0) {
 		char *decoded_text = NULL;
-		ssize_t cb_decoded = mime_text_decode2(mime, &decoded_text);
-		assert(cb_decoded > 0);
-
-		if(mime_text_is_utf8(mime)) {
-			mime->utf8 = decoded_text;
-			mime->cb_utf8 = cb_decoded;
+		ssize_t cb_decoded = mime_text_decode2(mtext, &decoded_text);
+		if(cb_decoded <= 0) goto label_err;
+		
+		if(mime_text_is_utf8(mtext)) {
+			mtext->utf8 = decoded_text;
+			mtext->cb_utf8 = cb_decoded;
 		}else {
-			mime->utf8 = NULL;
-			ssize_t bytes_left = text_to_utf8(charset, 
+			mtext->utf8 = NULL;
+			ssize_t bytes_left = text_to_utf8(mtext->charset, 
 				decoded_text, cb_decoded, 
-				&mime->utf8, &mime->cb_utf8);
-			if(mime->encode_type == 'B') gnutls_free(decoded_text);
-			else free(decoded_text);
-			
-			if(bytes_left == -1) return -1;
+				&mtext->utf8, &mtext->cb_utf8);
+			free(decoded_text);
+			if(bytes_left == -1) goto label_err;
 		}
 	}
+	mtext->raw_data = raw_data;
+	free(matched);
+	regex_context_cleanup(ctx);
 	return 0;
+	
+label_err:
+	if(matched) free(matched);
+	regex_context_cleanup(ctx);
+	free(raw_data);
+	return -1;
 }
 
 
@@ -267,18 +283,18 @@ int main(int argc, char **argv)
 	};
 	
 	int rc = 0;
-	struct mime_text mime[1];
-	memset(mime, 0, sizeof(mime));
+	struct mime_text mtext[1];
+	memset(mtext, 0, sizeof(mtext));
 	
 	for(int i = 0; i< NUM_HDRS; ++i) {
 		const char *line = msg_headers[i];
 		ssize_t cb_line = strlen(line);
-		rc = mime_text_parse(mime, line, cb_line);
+		rc = mime_text_parse(mtext, line, cb_line);
 		assert(0 == rc);
 		
-		printf("text(cb=%ld): (charset=%s)", (long)mime->utf8, mime->charset);
-		printf("%s\n", mime->utf8);
-		mime_text_clear(mime);
+		printf("text(cb=%ld): (charset=%s)", (long)mtext->utf8, mtext->charset);
+		printf("%s\n", mtext->utf8);
+		mime_text_clear(mtext);
 	}
 	
 #undef NUM_HDRS
