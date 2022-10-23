@@ -38,6 +38,97 @@
 #include "base64.h"
 #include "utils.h"
 
+static boolean s_usascii_char_table[256] = {
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,  
+	
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+};
+
+
+// #define TSPECIALS_RFC2045 "()<>@,;:\\\"/[]?="
+static boolean s_rfc2045_tspecials_table[256] = {
+	[(int)'('] = 1,
+	[(int)')'] = 1,
+	[(int)'<'] = 1,
+	[(int)'>'] = 1,
+	[(int)'@'] = 1,
+	[(int)','] = 1,
+	[(int)';'] = 1,
+	[(int)':'] = 1,
+	[(int)'\\'] = 1,
+	[(int)'"'] = 1,
+	[(int)'/'] = 1,
+	[(int)'['] = 1,
+	[(int)']'] = 1,
+	[(int)'?'] = 1,
+	[(int)'='] = 1,
+};
+
+boolean IS_USASCII_CHAR(char c) 
+{
+	return s_usascii_char_table[(unsigned char)c];
+}
+
+boolean IS_TSPECIALS(char c) 
+{
+	return s_rfc2045_tspecials_table[(unsigned char)c];
+}
+
+
+enum MIME_TRANSFER_ENCODING
+{
+	MIME_TRANSFER_ENCODING_7bit = 0,
+	MIME_TRANSFER_ENCODING_8bit,
+	MIME_TRANSFER_ENCODING_binary,
+	MIME_TRANSFER_ENCODING_quoted_printable,
+	MIME_TRANSFER_ENCODING_base64,
+	MIME_TRANSFER_ENCODING_ietf_token,
+	MIME_TRANSFER_ENCODING_x_token,
+	
+	MIME_TRANSFER_ENCODINGS_COUNT,
+};
+static const char *s_mime_transfer_encoding_string[MIME_TRANSFER_ENCODINGS_COUNT] = 
+{
+	[MIME_TRANSFER_ENCODING_7bit] = "7bit",
+	[MIME_TRANSFER_ENCODING_8bit] = "8bit",
+	[MIME_TRANSFER_ENCODING_binary] = "binary",
+	[MIME_TRANSFER_ENCODING_quoted_printable] = "quoted-printable",
+	[MIME_TRANSFER_ENCODING_base64] = "base64",
+	[MIME_TRANSFER_ENCODING_ietf_token] = "ietf-token",
+	[MIME_TRANSFER_ENCODING_x_token] = "x-token",
+};
+
+enum MIME_TRANSFER_ENCODING mime_transfer_encoding_from_string(const char *encoding_str)
+{
+	if(NULL == encoding_str) return -1;
+	for(int i = 0; i < MIME_TRANSFER_ENCODINGS_COUNT; ++i) {
+		if(0 == strcasecmp(encoding_str, s_mime_transfer_encoding_string[i])) return i;
+	}
+	return -1;
+}
+const char *mime_transfer_encoding_to_string(enum MIME_TRANSFER_ENCODING encoding)
+{
+	if(encoding < 0 || encoding >= MIME_TRANSFER_ENCODINGS_COUNT) return NULL;
+	return s_mime_transfer_encoding_string[encoding];
+}
+
+
+
 /**
  * text_to_utf8()
  * @param
@@ -48,6 +139,7 @@
  */
 ssize_t text_to_utf8(const char *charset, const char *text, size_t cb_text, char **p_utf8, size_t *cb_utf8)
 {
+	debug_printf("%s(%s, %s, %ld) ...", __FUNCTION__, charset, text, cb_text);
 	assert(charset && p_utf8 && cb_utf8);
 	if(NULL == text) return -1;
 	if(-1 == cb_text) cb_text = strlen(text);
@@ -117,22 +209,25 @@ static int s_hex_value[256] = {
 
 #define hex_value(c) s_hex_value[(unsigned char)(c)]
 #define MAKE_BYTE(hi, lo) ( (((unsigned char)(hi)) << 4) | ((unsigned char)(lo)) )
-static ssize_t quoted_printable_decode(const char *qp_text, ssize_t length, char **p_dst)
+ssize_t quoted_printable_decode(const char *qp_text, ssize_t length, char **p_dst)
 {
-	assert(qp_text && length > 0);
+	assert(qp_text && length < 1024);
+	if(length == 0) return 0;
+	
 	char *dst = *p_dst;
 	if(NULL == dst) {
 		dst = calloc(length + 1, 1);
 		assert(dst);
 		*p_dst = dst;
 	}
-	
 	const char *p = qp_text;
 	const char *p_end = p + length;
+	
+	while(p < p_end && (p_end[-1] == '\r' || p_end[-1] == '\n' || p_end[-1] == '=')) --p_end;
 	ssize_t cb_dst = 0;
 	
 	for(;p < p_end; ++cb_dst) {
-		if(*p == '=' && p < (p_end - 3)) {
+		if(*p == '=' && p <= (p_end - 3)) {
 			int hi = hex_value(p[1]);
 			int lo = hex_value(p[2]);
 			if(hi == -1 || lo == -1) return -1;
@@ -142,129 +237,119 @@ static ssize_t quoted_printable_decode(const char *qp_text, ssize_t length, char
 		}
 		*dst++ = *p++;
 	}
+	*dst = '\0';
 	return cb_dst;
 }
 
-/******************************************************************************
-// https://www.rfc-editor.org/rfc/rfc1522
-struct mime_text
+int mime_text_parse(const char *msg, size_t cb_msg, char **p_utf8, size_t *p_size)
 {
-	char *raw_data;
-	const char *charset;
-	char encode_type;
-	const char *text;
-	size_t length;
-	
-	char *utf8;
-	size_t cb_utf8;
-};
-******************************************************************************/
-_Bool mime_text_is_utf8(const struct mime_text *mtext)
-{
-	if(NULL == mtext || NULL == mtext->charset) return false;
-	return (strcasecmp(mtext->charset, "utf-8") == 0) || (strcasecmp(mtext->charset, "utf8") == 0);
-}
-
-void mime_text_clear(struct mime_text *mtext)
-{
-	if(NULL == mtext) return;
-	if(mtext->raw_data) free(mtext->raw_data);
-	if(mtext->utf8) {
-		free(mtext->utf8);
-	}
-	memset(mtext, 0, sizeof(*mtext));
-	return;
-}
-
-ssize_t mime_text_decode2(struct mime_text *mtext, char **p_decoded)
-{
-	char type = mtext->encode_type;
-	type &= ~0x20;
-	if(type != 'Q' && type != 'B') return -1;
-	
-	if(type == 'Q') return quoted_printable_decode(mtext->text, mtext->length, p_decoded);
-	return base64_decode(mtext->text, mtext->length, (unsigned char **)p_decoded);
-}
-
-int mime_text_parse(struct mime_text *mtext, const char *msg, ssize_t cb_msg)
-{
+	static struct regex_context *re_ctx = NULL;
 	static const char *pattern = 
-		"^=\\?(.*)"        // 1
-		"\\?([QqBb])"      // 2
-		"\\?(.*)"          // 3
-		"\\?=$";
-	
-	if(NULL == msg) return -1;
-	if(cb_msg == -1) cb_msg = strlen(msg);
-	if(cb_msg < 4) return -1;
+		"=\\?([^?]*)"        // 1
+		"\\?([QqBb])"        // 2
+		"\\?([^?]*)"         // 3
+		"\\?=";
+	assert(msg);
 	
 	int rc = 0;
-	struct regex_matched *matched = NULL;
-	struct regex_context re_ctx[1] = {{ NULL }};
-	struct regex_context *ctx = regex_context_init(re_ctx, NULL);
-	assert(ctx);
-	rc = ctx->set_patterns(ctx, 1, &pattern);
-	if(rc) goto label_err;
-	
-	char *raw_data = calloc(cb_msg + 1, 1);
-	assert(raw_data);
-	memcpy(raw_data, msg, cb_msg);
-	
-	ssize_t num_matched = ctx->match(ctx, msg, cb_msg, NULL, &matched);
-	if(num_matched != 4) {
-		goto label_err;
+	ssize_t cb_utf8 = 0;
+	if(NULL == re_ctx) {
+		re_ctx = regex_context_init(NULL, NULL);
+		assert(re_ctx);
+		rc = re_ctx->set_patterns(re_ctx, 1, &pattern);
+		assert(0 == rc);
 	}
-	int begin = -1, end = -1;
 	
-	// charset := \1
-	begin= matched[1].begin; end = matched[1].end;
-	assert(begin != -1 && end != -1);
-	raw_data[end] = '\0';
-	mtext->charset = &raw_data[begin];
+	if(cb_msg == -1) cb_msg = strlen(msg);
+	if(cb_msg == 0) return 0;
 	
-	// encode_type := \2
-	begin= matched[2].begin; end = matched[2].end;
-	if((end - begin) != 1) goto label_err;
-	mtext->encode_type = raw_data[begin];
+	const char *p = msg;
+	const char *p_end = p + cb_msg;
+	while(p[0] && IS_WSP(p[0])) ++p;	// trim_left
 	
-	// text := \3
-	begin= matched[3].begin; end = matched[3].end;
-	assert(begin != -1 && end != -1);
-	raw_data[end] = '\0';
-	mtext->text = &raw_data[begin];
-	mtext->length = end - begin;
+	ssize_t utf8_bufsize = cb_msg * 2;
+	if(NULL == p_utf8) return utf8_bufsize + 1;
 	
-	// decode text
-	if(mtext->length > 0) {
-		char *decoded_text = NULL;
-		ssize_t cb_decoded = mime_text_decode2(mtext, &decoded_text);
-		if(cb_decoded <= 0) goto label_err;
+	char *utf8 = *p_utf8;
+	if(NULL == utf8) {
+		utf8 = calloc(utf8_bufsize + 1, 1);
+		assert(utf8);
+		*p_utf8 = utf8;
+	}
+	
+	while(p < p_end) {
+		struct regex_matched *matched = NULL;
+		ssize_t num_matched = re_ctx->match(re_ctx, p, p_end - p, NULL, &matched);
+		if(NULL == matched) break;
+		assert(num_matched == 4);
 		
-		if(mime_text_is_utf8(mtext)) {
-			mtext->utf8 = decoded_text;
-			mtext->cb_utf8 = cb_decoded;
-		}else {
-			mtext->utf8 = NULL;
-			ssize_t bytes_left = text_to_utf8(mtext->charset, 
-				decoded_text, cb_decoded, 
-				&mtext->utf8, &mtext->cb_utf8);
-			free(decoded_text);
-			if(bytes_left == -1) {
-				debug_printf("text_to_utf8() failed.");
-				goto label_err;
+		ssize_t begin = matched[0].begin;
+		ssize_t end = matched[0].end;
+		assert(begin != -1 && end > 0);
+		
+		if(begin > 0) {
+			memcpy(utf8 + cb_utf8, p, begin);
+			cb_utf8 += begin;
+		}
+		
+		char charset[32] = "";
+		assert(matched[1].begin > 0 && matched[1].end > 0 && matched[1].end > matched[1].begin);
+		ssize_t cb_charset = matched[1].end - matched[1].begin;
+		assert(cb_charset < sizeof(charset));
+		memcpy(charset, &p[matched[1].begin], cb_charset);
+		charset[cb_charset] = '\0';
+		
+		assert(matched[2].begin > 0 && (matched[2].end - matched[2].begin) == 1 );
+		unsigned char encoding = p[matched[2].begin];
+		
+		assert(matched[3].begin > 0 && matched[3].end > 0 && matched[3].end > matched[3].begin);
+		const char * text = &p[matched[3].begin];
+		ssize_t cb_text = matched[3].end - matched[3].begin;
+		
+		
+		char buffer[1024] = "";
+		char *decoded_text = buffer;
+		ssize_t cb_decoded = -1;
+		 
+		switch(encoding) {
+		case 'Q': case 'q': cb_decoded = quoted_printable_decode(text, cb_text, &decoded_text); break;
+		case 'B': case 'b': cb_decoded = base64_decode(text, cb_text, (unsigned char **)&decoded_text); break;
+		default:
+			fprintf(stderr, "invalid encoding '%c'\n", encoding);
+			break;
+		}
+		assert(cb_decoded >= 0);
+		
+		if(cb_decoded > 0) {
+			if(0 == strcasecmp(charset, "utf8") 
+				|| 0 == strcasecmp(charset, "utf-8") 
+				|| 0 == strcasecmp(charset, "us-ascii")
+				|| 0)
+			{
+				memcpy(utf8 + cb_utf8, decoded_text, cb_decoded);
+				cb_utf8 += cb_decoded;
+			}else {
+				size_t length = utf8_bufsize - cb_utf8;
+				char *dst = utf8 + cb_utf8;
+				rc =  text_to_utf8(charset, decoded_text, cb_decoded, &dst, &length);
+				assert(rc >= 0);
+				assert(length > 0);
+				cb_utf8 += length;
 			}
 		}
+		
+		p = &p[matched[0].end];
+		free(matched);
 	}
-	mtext->raw_data = raw_data;
-	free(matched);
-	regex_context_cleanup(ctx);
-	return 0;
 	
-label_err:
-	if(matched) free(matched);
-	regex_context_cleanup(ctx);
-	free(raw_data);
-	return -1;
+	if(p < p_end) {
+		ssize_t length = p_end - p;
+		memcpy(utf8 + cb_utf8, p, length);
+		cb_utf8 += length;
+	}
+	*p_size = cb_utf8;
+	utf8[cb_utf8] = '\0';
+	return 0;
 }
 
 
@@ -273,32 +358,33 @@ label_err:
 int main(int argc, char **argv)
 {
 	const char *msg_headers[] = {
-		"=?us-ascii?Q?=3Dietf-822@test.mail?=",
+		"=?us-ascii?Q?=3Dietf-822@test.mail?= Hello World <test1@example.com>",
 		"=?UTF-8?B?V2luZG93c+OCteODvOODkDIwMTLjgYxFT1PjgIHjgYTjgYTmqZ8=?=",
 		"=?ISO-2022-JP?B?GyRCIVo/TTpgPlIycCFbQihGfCFBGyhCKDUwGyRCOlAbKEIv?=",
 		"=?utf8?q?ccc?=",
-		"=?utf8?A?ccc?=", // NG: (invalid encode_type)
-		"=?utf8?b?V2luZG93c+OCteODvOODkDIwMTLjgYxFT1PjgIHjgYTjgYTmqZ8=?=",
-		"==?ISO-2022-JP?B?GyRCIVo/TTpgPlIycCFbQihGfCFBGyhCKDUwGyRCOlAbKEIv?=", // NG: invalid leading chars
+		"=?utf8?A?ccc?=", 
+		"=?utf8?b?V2luZG93c+OCteODvOODkDIwMTLjgYxFT1PjgIHjgYTjgYTmqZ8=?= =?us-ascii?Q?=3Dietf-822@test.mail?=",
+		"==?ISO-2022-JP?B?GyRCIVo/TTpgPlIycCFbQihGfCFBGyhCKDUwGyRCOlAbKEIv?=", 
 	};
 #define NUM_HDRS ( sizeof(msg_headers) / sizeof(msg_headers[0]) )
 	
 	int rc = 0;
-	struct mime_text mtext[1];
-	memset(mtext, 0, sizeof(mtext));
+	char utf8_buf[4096] = "";
+	size_t utf8_bufsize = sizeof(utf8_buf);
+	
 	
 	for(int i = 0; i< NUM_HDRS; ++i) {
 		const char *line = msg_headers[i];
 		ssize_t cb_line = strlen(line);
-		rc = mime_text_parse(mtext, line, cb_line);
-		if(rc) {
-			fprintf(stderr, "\e[31m" "%.3d: invalid format: '%s'" "\e[39m" "\n", i, line);
-			continue;
-		}
 		
-		printf("\e[32m" "%.3d: text(cb=%ld): (charset=%s)", i, (long)mtext->utf8, mtext->charset);
-		printf("%s" "\e[39m" "\n", mtext->utf8);
-		mime_text_clear(mtext);
+		char *utf8 = utf8_buf;
+		size_t length = utf8_bufsize - 1;
+		
+		rc = mime_text_parse(line, cb_line, &utf8, &length);
+		assert(0 == rc);
+	
+		printf("\e[32m" "%.3d: (cb=%ld): ", i, (long)length);
+		printf("%s" "\e[39m" "\n", utf8);
 	}
 	
 #undef NUM_HDRS
