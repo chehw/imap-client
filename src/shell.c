@@ -142,7 +142,7 @@ static void shell_load_mails(struct shell_context *shell)
 	assert(mail && imap);
 	
 	json_object *jlist = NULL;
-	int rc = mail->list(mail, "/", NULL, &jlist);
+	int rc = mail->list(mail, "\"\"", "*", &jlist);
 	if(0 == rc && jlist) {
 		load_mailbox_folders(shell, jlist);
 	}
@@ -374,7 +374,8 @@ static ssize_t load_test_data(struct rfc822_mail **p_mails)
 {
 	static struct rfc822_mail mails[1];
 	if(NULL == mails[0].headers) {
-		static const char *sample_mail = "rfc822-sample.json";
+		static const char *sample_mail = //"rfc822-sample.json";
+			"log.1/00374669.json";
 		int rc = load_json_mail_file(&mails[0], sample_mail);
 		assert(0 == rc);
 	}
@@ -404,7 +405,7 @@ static void load_mail_list(struct shell_context *shell, const char *folder_name)
 	
 	int rc = 0;
 	uint64_t *uids = NULL;
-	const ssize_t limits = 10;
+	const ssize_t limits = 2;
 	ssize_t num_mails = utils->query_uidlist(utils, folder_name, limits, &uids);
 	if(num_mails > 0) {
 		struct rfc822_mail *mails = calloc(num_mails, sizeof(*mails));

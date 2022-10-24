@@ -253,6 +253,7 @@ int mail_utils_list(struct mail_utils *mail, const char *folder, const char *par
 	if(NULL == params) params = "*";
 	
 	snprintf(command, sizeof(command) - 1, "LIST %s", folder);
+	printf("imap command: %s %s\n", command, params);
 	rc = imap->send_command(imap, command, params, &jresult);
 	if(rc) goto label_err;
 	
@@ -403,6 +404,7 @@ ssize_t mime_headers_parse(SoupMessageHeaders *headers, const char **p_top, cons
 	char key[1024] = "";
 	struct imap_buffer value[1];
 	memset(value, 0, sizeof(value));
+	imap_buffer_init(value, 4096);
 	
 	const char **lines = p_top;
 	ssize_t lines_count = 0;
@@ -417,20 +419,23 @@ ssize_t mime_headers_parse(SoupMessageHeaders *headers, const char **p_top, cons
 				
 				debug_printf("add_header: [%s]: [%s]\n", key, value->data);
 				key[0] = '\0';
-				imap_buffer_clear(value);
+				value->data[0] = '\0';
+				value->length = 0;
 			}
 			break;
 		}
 		
 		const char *encoded_value = line;
-		int is_new_key = !IS_WSP(line[0]);		
+		int is_new_key = !IS_WSP(line[0]);
 		if(is_new_key) {	// next key/value pair
 			if(key[0]) {	// add prev pairs and reset buffer
+				
 				value->data[value->length] = '\0';
 				soup_message_headers_append(headers, key, value->data);
 				debug_printf("add_header: [%s]: [%s]\n", key, value->data);
 				key[0] = '\0';
-				imap_buffer_clear(value);
+				value->data[0] = '\0';
+				value->length = 0;
 			}
 			
 			const char *p = strchr(line, ':');
@@ -455,6 +460,8 @@ ssize_t mime_headers_parse(SoupMessageHeaders *headers, const char **p_top, cons
 		debug_printf("decoded text(length=%ld): '%s'", (long)length, buffer);
 		if(length > 0) imap_buffer_push_data(value, utf8, length);
 	}
+	
+	imap_buffer_clear(value);
 	return lines_count;
 }
 
@@ -542,8 +549,8 @@ static ssize_t mime_body_load_base64(struct imap_buffer *body, const char *chars
 	if(boundary && cb_boundary == -1) cb_boundary = strlen(boundary);
 	
 	const char **lines = p_top;
-	char decoded_buf[128] = "";
-	char utf8[256] = "";
+	struct imap_buffer b64[1];
+	memset(b64, 0, sizeof(b64));
 	
 	while((lines + lines_count) < p_bottom) {
 		const char *line = lines[lines_count++];
@@ -551,7 +558,7 @@ static ssize_t mime_body_load_base64(struct imap_buffer *body, const char *chars
 		if(boundary) {
 			if(line[0] == '-' && line[1] == '-') {
 				enum multipart_indicator indicator = multipart_indicator_check(line, cb_line, boundary, cb_boundary);
-				if(indicator == multipart_indicator_begin || indicator == multipart_indicator_end) return lines_count;
+				if(indicator == multipart_indicator_begin || indicator == multipart_indicator_end) break;
 			}
 		}
 		
@@ -559,21 +566,26 @@ static ssize_t mime_body_load_base64(struct imap_buffer *body, const char *chars
 		if(cb_line == 0) { // empty line
 			continue;
 		}
-		assert(cb_line <= 76);
-		assert((cb_line % 4) == 0);
-		char *dst = decoded_buf;
-		size_t cb_decoded = base64_decode(line, cb_line, (unsigned char **)&dst);
-		assert(cb_decoded <= (cb_line / 4 * 3));
-		
-		size_t cb_utf8 = cb_decoded;
+		imap_buffer_push_data(b64, (char *)line, cb_line);
+	}
+	
+	if(b64->length > 0) {
+		assert((b64->length % 4) == 0);
+		imap_buffer_clear(body);
+		unsigned char *decoded = NULL;
+		ssize_t cb_decoded = base64_decode(b64->data, b64->length, &decoded);
+		assert(cb_decoded <= (b64->length / 4 * 3));
 		if(charset) {
-			dst = utf8;
-			cb_utf8 = sizeof(utf8) - 1;
-			int n = text_to_utf8(charset, decoded_buf, cb_decoded, &dst, &cb_utf8);
+			int n = text_to_utf8(charset, (char *)decoded, cb_decoded, 
+				&body->data, &body->length);
 			assert(n >= 0);
-			assert(cb_utf8 >= cb_decoded);
+			free(decoded);
+			decoded = NULL;
+		}else {
+			body->data = (char *)decoded;
+			body->length = cb_decoded;
+			body->size = cb_decoded;
 		}
-		imap_buffer_push_data(body, dst, cb_utf8);
 	}
 	return lines_count;
 }
@@ -646,9 +658,7 @@ static ssize_t multipart_parse(struct rfc822_mail_body *part,
 		fprintf(stderr, "%s(): skip line %s\n", __FUNCTION__, lines[0]);
 		++lines;
 	}
-
-	if(lines > p_bottom) return -1;
-	if(lines == p_bottom) return lines - p_top;
+	if(lines >= p_bottom) return p_bottom - p_top;
 	
 	SoupMessageHeaders *headers = part->headers;
 	struct imap_buffer *body = part->content;
