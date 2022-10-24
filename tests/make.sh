@@ -36,8 +36,10 @@ case "$target" in
 			../src/mail_db.c ../src/shell.c ../src/bdb_context.c \
 			../utils/utils.c ../utils/crypto.c \
 			../src/load-mails.c \
+			../src/text-utils.c \
+			../utils/base64.c ../utils/regex-utils.c \
 			-lm -lpthread -ljson-c -ldb \
-			$(pkg-config --cflags --libs gnutls gtk+-3.0 webkit2gtk-4.0)
+			$(pkg-config --cflags --libs gnutls gtk+-3.0 webkit2gtk-4.0 libsoup-2.4 gnutls) -lpcre2-8
 		;;
 		
 	text-utils)
@@ -57,9 +59,11 @@ case "$target" in
 			-o test_load-mails ../src/load-mails.c \
 			../src/imap_client.c ../src/imap_buffer.c ../src/app.c \
 			../src/mail_db.c ../src/shell.c ../src/bdb_context.c \
+			../src/text-utils.c \
 			../utils/utils.c ../utils/crypto.c \
+			../utils/base64.c ../utils/regex-utils.c \
 			-lm -lpthread -ljson-c -ldb \
-			$(pkg-config --cflags --libs gnutls gtk+-3.0 webkit2gtk-4.0)
+			$(pkg-config --cflags --libs gnutls gtk+-3.0 webkit2gtk-4.0 libsoup-2.4) -lpcre2-8
 		;;
 	
 	base64)

@@ -6,7 +6,7 @@ OPTIMIZE ?= -O2
 CC=gcc -std=gnu99 -D_DEFAULT_SOURCE -D_GNU_SOURCE
 LINKER=$(CC)
 CFLAGS = -Wall -Iinclude -Iutils -Isrc -pthread
-LIBS = -lm -lpthread -lcurl -ljson-c -ldb
+LIBS = -lm -lpthread -lcurl -ljson-c -ldb -lpcre2-8
 
 ifeq ($(DEBUG),1)
 CFLAGS += -g -D_DEBUG

@@ -40,6 +40,25 @@
 #include <endian.h>
 
 #include "mail_utils.h"
+#include "text-utils.h"
+#include "base64.h"
+
+#include <stdbool.h>
+#include <libsoup/soup.h>
+
+#define MULTIPART_BODY_MAX_ARRAY_SIZE 256
+static enum multipart_indicator multipart_indicator_check(const char *line, size_t cb_line, const char *boundary, size_t cb_boundary);
+
+static inline _Bool is_utf8_compatible(const char *charset)
+{
+	if(NULL == charset 
+	|| strcasecmp(charset, "utf8") == 0 
+	|| strcasecmp(charset, "utf-8") == 0
+	|| strcasecmp(charset, "us-ascii") == 0
+	|| 0) return true;
+
+	return false;
+}
 
 #define JSON_OUTPUT_FORMAT (JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE)
 static ssize_t query_mail_exists(json_object *jmessages, ssize_t *p_uidnext, ssize_t *p_recent)
@@ -313,13 +332,483 @@ void mail_utils_cleanup(struct mail_utils *mail)
 	return;
 }
 
+void rfc822_mail_body_clear(struct rfc822_mail_body *body)
+{
+	if(NULL == body) return;
+	if(body->is_multipart && body->headers) {
+		soup_message_headers_free(body->headers);
+		body->headers = NULL;
+	}
+	body->is_multipart = 0;
+	imap_buffer_clear(body->content);
+	return;
+}
+
+void rfc822_mail_cleanup(struct rfc822_mail *mail)
+{
+	if(NULL == mail) return;
+	if(mail->headers) soup_message_headers_free(mail->headers);
+	if(mail->parts) {
+		for(ssize_t i = 0; i < mail->num_parts; ++i) {
+			rfc822_mail_body_clear(&mail->parts[i]);
+		}
+		free(mail->parts);
+		mail->parts = NULL;
+	}
+	memset(mail, 0, sizeof(*mail));
+	return;
+}
+
+//~ static void dump_mail_headers(SoupMessageHeaders *headers)
+//~ {
+	//~ SoupMessageHeadersIter iter;
+	//~ soup_message_headers_iter_init(&iter, headers);
+	//~ const char *name = NULL, *value = NULL;
+	
+	//~ printf("==== %s() ====\n", __FUNCTION__);
+	//~ while(soup_message_headers_iter_next(&iter, &name, &value)) {
+		//~ printf("%s: %s\n", name, value);
+	//~ }
+//~ }
+
+enum multipart_indicator
+{
+	multipart_indicator_unknown = -1,
+	multipart_indicator_none = 0,
+	multipart_indicator_begin = 1,
+	multipart_indicator_end = 2,
+};
+
+static enum multipart_indicator multipart_indicator_check(const char *line, size_t cb_line, const char *boundary, size_t cb_boundary)
+{ 
+	assert(boundary);
+	if(cb_boundary == -1) cb_boundary = strlen(boundary);
+	if(cb_line == -1) cb_line = strlen(line);
+	
+	if(cb_line < 2 || boundary <= 0 || (cb_line - 2) < cb_boundary) return multipart_indicator_none;
+	if(line[0] != '-' || line[1] != '-') return multipart_indicator_none;
+	line += 2;
+
+	if(strncasecmp(line, boundary, cb_boundary) != 0) return multipart_indicator_none;
+	line += cb_boundary;
+	
+	if(line[0] == '\0' || IS_CRLF(line[0])) return multipart_indicator_begin;
+	if(line[0] == '-' && line[1] == '-') return multipart_indicator_end;
+	
+	return multipart_indicator_unknown;
+}
+
+ssize_t mime_headers_parse(SoupMessageHeaders *headers, const char **p_top, const char **p_bottom)
+{
+	char key[1024] = "";
+	struct imap_buffer value[1];
+	memset(value, 0, sizeof(value));
+	
+	const char **lines = p_top;
+	ssize_t lines_count = 0;
+	while((lines + lines_count) < p_bottom) {
+		const char *line = lines[lines_count++];
+		if(line[0] == '\r' && line[1] == '\n') { // end of headers
+			debug_printf("== end of line @%ld: prev_line: %s\n", (long)lines_count, lines[lines_count-2]);
+			
+			if(key[0]) {	// add prev pairs and reset buffer
+				value->data[value->length] = '\0';
+				soup_message_headers_append(headers, key, value->data);
+				
+				debug_printf("add_header: [%s]: [%s]\n", key, value->data);
+				key[0] = '\0';
+				imap_buffer_clear(value);
+			}
+			break;
+		}
+		
+		const char *encoded_value = line;
+		int is_new_key = !IS_WSP(line[0]);		
+		if(is_new_key) {	// next key/value pair
+			if(key[0]) {	// add prev pairs and reset buffer
+				value->data[value->length] = '\0';
+				soup_message_headers_append(headers, key, value->data);
+				debug_printf("add_header: [%s]: [%s]\n", key, value->data);
+				key[0] = '\0';
+				imap_buffer_clear(value);
+			}
+			
+			const char *p = strchr(line, ':');
+			assert(p);
+			size_t cb_key = p - line;
+			assert(cb_key < sizeof(key));
+			memcpy(key, line, cb_key);
+			key[cb_key] = '\0';
+			
+			encoded_value = p + 1;
+		}
+		while(encoded_value[0] && IS_WSP(encoded_value[0])) ++encoded_value; // trim_left
+		
+		const char *p_endl = strstr(encoded_value, "\r\n");
+		assert(p_endl);
+		
+		char buffer[4096] = "";
+		char *utf8 = buffer;
+		size_t length = sizeof(buffer);
+		int rc = mime_header_value_decode(encoded_value, p_endl - encoded_value, &utf8, &length);
+		assert(0 == rc);
+		debug_printf("decoded text(length=%ld): '%s'", (long)length, buffer);
+		if(length > 0) imap_buffer_push_data(value, utf8, length);
+	}
+	return lines_count;
+}
+
+static ssize_t mime_body_load_default(struct imap_buffer *body, 
+	const char *charset,
+	const char **lines, const char **p_bottom, 
+	const char *boundary, ssize_t cb_boundary)
+{
+	ssize_t lines_count = 0;
+	if(boundary && cb_boundary == -1) cb_boundary = strlen(boundary);
+	
+	while((lines + lines_count) < p_bottom) {
+		const char *line = lines[lines_count++];
+		ssize_t cb_line = strlen(line);
+		assert(cb_line > 0);
+		if(boundary) {
+			enum multipart_indicator indicator = multipart_indicator_check(line, cb_line, boundary, cb_boundary);
+			if(indicator == multipart_indicator_begin || indicator == multipart_indicator_end) return lines_count;
+		}
+		imap_buffer_push_data(body, (char *)line, cb_line);
+	}
+	return lines_count;
+}
+static ssize_t mime_body_load_quoted_printable(struct imap_buffer *body, 
+	const char *charset,
+	const char **p_top, const char **p_bottom, 
+	const char *boundary, ssize_t cb_boundary)
+{
+	ssize_t lines_count = 0;
+	if(boundary && cb_boundary == -1) cb_boundary = strlen(boundary);
+	
+	const char **lines = p_top;
+	char decoded_buf[1024] = "";
+	char utf8[4096] = "";
+	
+	while((lines + lines_count) < p_bottom) {
+		const char *line = lines[lines_count++];
+		ssize_t cb_line = strlen(line);
+		if(boundary) {
+			if(line[0] == '-' && line[1] == '-') {
+				debug_printf("multipart_indicator_check(%.*s)\n", (int)cb_line, line);
+				enum multipart_indicator indicator = multipart_indicator_check(line, cb_line, boundary, cb_boundary);
+				
+				printf("indicator = %d\n", indicator);
+				if(indicator == multipart_indicator_begin || indicator == multipart_indicator_end) {
+					return (lines_count - 1);
+				}
+			}
+		}
+		
+		while(cb_line > 0 && IS_CRLF(line[cb_line - 1])) --cb_line;
+		if(cb_line == 0) {
+			imap_buffer_push_data(body, "\r\n", 2); // empty line
+			continue;
+		}
+		
+		char *dst = decoded_buf;
+		int partial_line_flag = (line[cb_line - 1] == '=');
+		
+		ssize_t cb_decoded = quoted_printable_decode(line, cb_line, &dst);
+		assert(cb_decoded >= 0);
+		if(0 == cb_decoded) {
+			imap_buffer_push_data(body, "\r\n", 2); // empty line
+			continue;
+		}
+		size_t cb_utf8 = cb_decoded;
+		if(charset) {
+			dst = utf8;
+			cb_utf8 = sizeof(utf8) - 1;
+			int n = text_to_utf8(charset, decoded_buf, cb_decoded, &dst, &cb_utf8);
+			assert(n >= 0);
+			assert(cb_utf8 >= cb_decoded);
+		}
+		imap_buffer_push_data(body, dst, cb_utf8);
+		if(!partial_line_flag) imap_buffer_push_data(body, "\r\n", 2);
+	}
+	return lines_count;
+}
+
+static ssize_t mime_body_load_base64(struct imap_buffer *body, const char *charset,
+	const char **p_top, const char **p_bottom, 
+	const char *boundary, ssize_t cb_boundary)
+{
+	ssize_t lines_count = 0;
+	if(boundary && cb_boundary == -1) cb_boundary = strlen(boundary);
+	
+	const char **lines = p_top;
+	char decoded_buf[128] = "";
+	char utf8[256] = "";
+	
+	while((lines + lines_count) < p_bottom) {
+		const char *line = lines[lines_count++];
+		ssize_t cb_line = strlen(line);
+		if(boundary) {
+			if(line[0] == '-' && line[1] == '-') {
+				enum multipart_indicator indicator = multipart_indicator_check(line, cb_line, boundary, cb_boundary);
+				if(indicator == multipart_indicator_begin || indicator == multipart_indicator_end) return lines_count;
+			}
+		}
+		
+		while(cb_line > 0 && IS_CRLF(line[cb_line - 1])) --cb_line;
+		if(cb_line == 0) { // empty line
+			continue;
+		}
+		assert(cb_line <= 76);
+		assert((cb_line % 4) == 0);
+		char *dst = decoded_buf;
+		size_t cb_decoded = base64_decode(line, cb_line, (unsigned char **)&dst);
+		assert(cb_decoded <= (cb_line / 4 * 3));
+		
+		size_t cb_utf8 = cb_decoded;
+		if(charset) {
+			dst = utf8;
+			cb_utf8 = sizeof(utf8) - 1;
+			int n = text_to_utf8(charset, decoded_buf, cb_decoded, &dst, &cb_utf8);
+			assert(n >= 0);
+			assert(cb_utf8 >= cb_decoded);
+		}
+		imap_buffer_push_data(body, dst, cb_utf8);
+	}
+	return lines_count;
+}
+
+
+ssize_t mime_body_parse(struct imap_buffer *body, 
+	SoupMessageHeaders *headers,
+	const char *boundary, size_t cb_boundary,
+	const char **lines, const char **p_bottom)
+{
+	const char *mime_version = soup_message_headers_get_one(headers, "Mime-Version");
+	if(NULL == mime_version) mime_version = "1.0";
+	assert(0 == strncasecmp(mime_version, "1.0", 3));
+	
+	GHashTable *type_params = NULL;
+	const char *charset = NULL;
+	const char *transfer_encoding = NULL;
+	const char *content_type = NULL;
+	
+	content_type = soup_message_headers_get_content_type(headers, &type_params);
+	if(content_type && type_params) {
+		charset = g_hash_table_lookup(type_params, "charset");
+	}
+	transfer_encoding = soup_message_headers_get_one(headers, "Content-Transfer-Encoding");
+	enum MIME_TRANSFER_ENCODING encoding = mime_transfer_encoding_from_string(transfer_encoding);
+	
+	int utf8_compatible = is_utf8_compatible(charset);
+	if(utf8_compatible) charset = NULL;
+	
+	switch(encoding) {
+	case MIME_TRANSFER_ENCODING_7bit:
+	case MIME_TRANSFER_ENCODING_8bit:
+	case MIME_TRANSFER_ENCODING_binary:
+		assert(encoding != MIME_TRANSFER_ENCODING_binary); // not implemented
+		return mime_body_load_default(body, charset, lines, p_bottom, boundary, cb_boundary);
+	case MIME_TRANSFER_ENCODING_quoted_printable:
+		return mime_body_load_quoted_printable(body, charset, lines, p_bottom, boundary, cb_boundary);
+	case MIME_TRANSFER_ENCODING_base64:
+		return mime_body_load_base64(body, charset, lines, p_bottom, boundary, cb_boundary);
+	default:
+		fprintf(stderr, "Not implemented. (encoding = %d) transfer_encoding = %s\n", encoding, transfer_encoding);
+		abort();
+	}
+	return -1;
+}
+
+static ssize_t multipart_parse(struct rfc822_mail_body *part, 
+	const char *boundary, ssize_t cb_boundary, 
+	const char **p_top, const char **p_bottom)
+{
+	assert(part && boundary);
+	const char **lines = p_top;
+	assert(lines && lines < p_bottom);
+	
+	debug_printf("top line: %s\n", lines[0]);
+	
+	if(cb_boundary == -1) cb_boundary = strlen(boundary);
+	assert(cb_boundary > 0);
+	while(lines < p_bottom) {
+		const char *line = lines[0];
+		// find begin line
+		if(line[0] == '-' && line[1] == '-') {
+			enum multipart_indicator indicator = multipart_indicator_check(lines[0], -1, boundary, cb_boundary);
+			printf("indicator = %d\n", indicator);
+			if(indicator == multipart_indicator_begin) {
+				++lines;
+				break;
+			}
+		}
+		fprintf(stderr, "%s(): skip line %s\n", __FUNCTION__, lines[0]);
+		++lines;
+	}
+
+	if(lines > p_bottom) return -1;
+	if(lines == p_bottom) return lines - p_top;
+	
+	SoupMessageHeaders *headers = part->headers;
+	struct imap_buffer *body = part->content;
+	if(NULL == headers) {
+		headers = soup_message_headers_new(SOUP_MESSAGE_HEADERS_MULTIPART);
+		assert(headers);
+		part->headers = headers;
+	}
+	if(NULL == body->data) {
+		body = imap_buffer_init(part->content, 0);
+		assert(body);
+	}
+	
+	ssize_t lines_count = mime_headers_parse(headers, lines, p_bottom);
+	assert(lines_count > 0);
+	lines += lines_count;
+	
+	lines_count = mime_body_parse(body, headers, boundary, cb_boundary, lines, p_bottom);
+	assert(lines_count >= 0);
+	
+	lines += lines_count;
+	return (lines - p_top); // lines parsed
+}
+
+int rfc822_mail_parse(struct rfc822_mail * mail, const struct lines_array *array)
+{
+	assert(mail);
+	SoupMessageHeaders *headers = mail->headers;
+	if(NULL == headers) {
+		headers = soup_message_headers_new(SOUP_MESSAGE_HEADERS_RESPONSE);
+		assert(headers);
+		mail->headers = headers;
+	}
+	
+	const char **p_top = (const char **)array->lines;
+	const char **lines = p_top;
+	const char **p_bottom = lines + array->length;
+	
+	ssize_t lines_count = mime_headers_parse(headers, lines, p_bottom);
+	assert(lines_count > 0);
+	lines += lines_count;
+	
+	GHashTable *type_params = NULL;
+	const char *content_type = NULL;
+	const char *boundary = NULL;
+	ssize_t cb_boundary = -1;
+	_Bool is_multipart = false;
+
+	content_type = soup_message_headers_get_content_type(headers, &type_params);
+	if(content_type && type_params) {
+		is_multipart = (0 == strncasecmp(content_type, "multipart/", 10));
+		if(is_multipart) {
+			boundary = g_hash_table_lookup(type_params, "boundary");
+			assert(boundary);
+			cb_boundary = strlen(boundary);
+		}
+	}
+		
+	if(is_multipart) {
+		struct rfc822_mail_body *parts = calloc(MULTIPART_BODY_MAX_ARRAY_SIZE, sizeof(*parts));
+		assert(parts);
+		mail->parts = parts;
+		int num_parts = 0;
+		
+		while(lines < p_bottom) {
+			assert(num_parts < MULTIPART_BODY_MAX_ARRAY_SIZE);
+			struct rfc822_mail_body *body = &parts[num_parts++];
+			body->is_multipart = is_multipart;
+			
+			debug_printf("top_line: %s", lines[0]);
+			lines_count = multipart_parse(body, boundary, cb_boundary, lines, p_bottom);
+			debug_printf("lines_count: %ld\n", (long)lines_count);
+			
+			
+			assert(lines_count > 0);
+			lines += lines_count;
+		}
+		mail->num_parts = num_parts;
+	}else {
+		struct rfc822_mail_body *body = calloc(1, sizeof(*body));
+		assert(body);
+		
+		mail->num_parts = 1;
+		mail->parts = body;
+		body->headers = mail->headers;
+		lines_count = mime_body_parse(body->content, mail->headers, NULL, 0, lines, p_bottom);
+	}
+	return 0;
+}
+
+
+int rfc822_mail_parse_json(struct rfc822_mail *mail, json_object *jrfc822)
+{
+	json_object *jdata = NULL;
+	json_bool ok = json_object_object_get_ex(jrfc822, "data", &jdata);
+	assert(ok && jdata);
+	
+	int num_lines = json_object_array_length(jdata);
+	assert(num_lines > 0);
+	
+	struct lines_array array[1] = {{ 0 }};
+	int rc = lines_array_resize(array, num_lines);
+	assert(0 == rc);
+	
+	for(int i = 0; i < num_lines; ++i) {
+		json_object *jline = json_object_array_get_idx(jdata, i);
+		array->lines[i] = (char *)json_object_get_string(jline);
+	}
+	array->length = num_lines;
+	
+	rc = rfc822_mail_parse(mail, array);
+	assert(0 == rc);
+	
+	free(array->lines);
+	return rc;
+}
+
+
 #if defined(TEST_LOAD_MAILS_) && defined(_STAND_ALONE)
 #include <gtk/gtk.h>
 static struct app_context g_app[1];
 
 static int test_load_mails(struct app_context *app, struct imap_client_context *imap, struct mail_db_context *mail_db);
+
+static void test_load_rfc822()
+{
+	json_object *jrfc822 = json_object_from_file("rfc822-sample.json");
+	assert(jrfc822);
+	
+	json_object *jdata = NULL;
+	json_bool ok = json_object_object_get_ex(jrfc822, "data", &jdata);
+	assert(ok && jdata);
+	
+	int num_lines = json_object_array_length(jdata);
+	assert(num_lines > 0);
+	
+	struct lines_array array[1] = {{ 0 }};
+	int rc = lines_array_resize(array, num_lines);
+	assert(0 == rc);
+	
+	for(int i = 0; i < num_lines; ++i) {
+		json_object *jline = json_object_array_get_idx(jdata, i);
+		array->lines[i] = (char *)json_object_get_string(jline);
+	}
+	array->length = num_lines;
+	
+	struct rfc822_mail mail[1] = { NULL };
+	rc = rfc822_mail_parse(mail, array);
+	assert(0 == rc);
+	
+	free(array->lines);
+	rfc822_mail_cleanup(mail);
+	json_object_put(jrfc822);
+	return;
+}
 int main(int argc, char **argv)
 {
+	test_load_rfc822();
+	return 0;
+	
 	gtk_init(&argc, &argv);
 	
 	int rc = 0;

@@ -22,6 +22,7 @@ struct shell_private
 	GtkWidget *grid;
 	
 	GtkWidget *hpaned;
+	GtkWidget *mail_folders;
 	GtkWidget *mail_list;
 	GtkWidget *textview;
 	GtkWidget *webview;

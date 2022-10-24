@@ -90,18 +90,6 @@ boolean IS_TSPECIALS(char c)
 }
 
 
-enum MIME_TRANSFER_ENCODING
-{
-	MIME_TRANSFER_ENCODING_7bit = 0,
-	MIME_TRANSFER_ENCODING_8bit,
-	MIME_TRANSFER_ENCODING_binary,
-	MIME_TRANSFER_ENCODING_quoted_printable,
-	MIME_TRANSFER_ENCODING_base64,
-	MIME_TRANSFER_ENCODING_ietf_token,
-	MIME_TRANSFER_ENCODING_x_token,
-	
-	MIME_TRANSFER_ENCODINGS_COUNT,
-};
 static const char *s_mime_transfer_encoding_string[MIME_TRANSFER_ENCODINGS_COUNT] = 
 {
 	[MIME_TRANSFER_ENCODING_7bit] = "7bit",
@@ -115,7 +103,7 @@ static const char *s_mime_transfer_encoding_string[MIME_TRANSFER_ENCODINGS_COUNT
 
 enum MIME_TRANSFER_ENCODING mime_transfer_encoding_from_string(const char *encoding_str)
 {
-	if(NULL == encoding_str) return -1;
+	if(NULL == encoding_str) return MIME_TRANSFER_ENCODING_7bit; // default
 	for(int i = 0; i < MIME_TRANSFER_ENCODINGS_COUNT; ++i) {
 		if(0 == strcasecmp(encoding_str, s_mime_transfer_encoding_string[i])) return i;
 	}
@@ -241,7 +229,7 @@ ssize_t quoted_printable_decode(const char *qp_text, ssize_t length, char **p_ds
 	return cb_dst;
 }
 
-int mime_text_parse(const char *msg, size_t cb_msg, char **p_utf8, size_t *p_size)
+int mime_header_value_decode(const char *msg, size_t cb_msg, char **p_utf8, size_t *p_size)
 {
 	static struct regex_context *re_ctx = NULL;
 	static const char *pattern = 
@@ -249,7 +237,8 @@ int mime_text_parse(const char *msg, size_t cb_msg, char **p_utf8, size_t *p_siz
 		"\\?([QqBb])"        // 2
 		"\\?([^?]*)"         // 3
 		"\\?=";
-	assert(msg);
+	assert(msg && p_size);
+	*p_size = 0;
 	
 	int rc = 0;
 	ssize_t cb_utf8 = 0;
@@ -262,6 +251,7 @@ int mime_text_parse(const char *msg, size_t cb_msg, char **p_utf8, size_t *p_siz
 	
 	if(cb_msg == -1) cb_msg = strlen(msg);
 	if(cb_msg == 0) return 0;
+
 	
 	const char *p = msg;
 	const char *p_end = p + cb_msg;
@@ -276,6 +266,7 @@ int mime_text_parse(const char *msg, size_t cb_msg, char **p_utf8, size_t *p_siz
 		assert(utf8);
 		*p_utf8 = utf8;
 	}
+	
 	
 	while(p < p_end) {
 		struct regex_matched *matched = NULL;
@@ -371,8 +362,7 @@ int main(int argc, char **argv)
 	int rc = 0;
 	char utf8_buf[4096] = "";
 	size_t utf8_bufsize = sizeof(utf8_buf);
-	
-	
+
 	for(int i = 0; i< NUM_HDRS; ++i) {
 		const char *line = msg_headers[i];
 		ssize_t cb_line = strlen(line);
